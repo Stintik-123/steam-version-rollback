@@ -1,0 +1,6 @@
+{
+	"_comment": "Подписи веток в панели. Верхний ключ — AppID, внутри branch -> подпись. _generic применяется ко всем играм. Свой файл можно положить в %LOCALAPPDATA%\\VersionRollback\\labels.json — он важнее этого.",
+	"_generic": {
+		"public": "Текущая (public)"
+	}
+}

@@ -1,0 +1,41 @@
+[plugin]
+id = "com.versionrollback.steam"
+name = "Version Rollback"
+version = "0.1.0"
+author = "Stintik-123"
+description = "Скачивание и откат конкретной версии игры: выбор ветки/манифеста, загрузка депо через сам Steam, бэкап и подмена файлов."
+
+[assets]
+resources = ["resources/**/*"]
+
+[backend]
+entry = "backend/main.lua"
+# main.lua — сборка из backend/lib/*.lua + boot.lua (tools/bundle-backend.mjs):
+# в упакованном .star require соседних файлов не работает.
+sources = ["backend/main.lua"]
+
+[frontend]
+entry = "frontend/index.tsx"
+
+[compiler]
+# auto = собрать и положить плагин прямо в установленный Millennium
+output_path = "auto"
+
+[dev]
+auto_restart = true
+# при правках .lua и .tsx перезагружаем UI Steam автоматически
+reload_steamui_when = "both"
+
+[inspect]
+depth = 4
+colors = true
+show_hidden = true
+
+[logger]
+padding = 0
+backend_prefix = "VRB-BCK"
+frontend_prefix = "VRB-FRT"
+
+[patches]
+# true = Millennium логирует, какие патчи применились (нужно при подборе хуков)
+debug = true
