@@ -1,7 +1,7 @@
 /** Общие константы фронтенда. */
 
 /** Версия плагина (показывается в интерфейсе и в millennium.toml). */
-export const PLUGIN_VERSION = '0.6.1';
+export const PLUGIN_VERSION = '0.6.2';
 
 /** Настройка, в которой хранится решение пользователя по сбору: yes / no / ''. */
 export const CONSENT_KEY = 'collect_consent';

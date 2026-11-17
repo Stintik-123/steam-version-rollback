@@ -1,38 +1,22 @@
 /**
  * Вставка UI Version Rollback в интерфейс Steam БЕЗ поллинга.
  *
- * Что здесь изменилось по сравнению с 0.5.x (причина краха 0xC0000409):
- *  - убраны ВСЕ setInterval: раньше каждые 800 мс сканировался весь документ
- *    (querySelectorAll по div/span/h2/h3 + getBoundingClientRect у каждого
- *    листа), а каждые 1.5 с пересоздавалась кнопка — постоянная грелка layout
- *    в CEF и гонка с перерисовками Steam;
- *  - вместо этого один MutationObserver с дебаунсом 400 мс: реагируем только
- *    на реальные изменения DOM, маркер ищем TreeWalker-ом по текстовым узлам
- *    без принудительного layout;
- *  - RPC-вызовы при монтировании сведены к минимуму и идут через
- *    последовательную очередь (lib/rpc.ts) — одновременных callServerMethod
- *    больше не бывает;
- *  - любое монтирование обёрнуто в try/catch, а после нескольких подряд
- *    ошибок инъекция сама отключается на сессию и пишет диагностику, вместо
- *    того чтобы молотить по хосту.
- *
- * 0.6.1: кнопку справа снизу (dock) отключили — ensureDock = no-op.
+ * 0.6.2: карточку согласия больше НЕ показывает inject — только GlobalCard
+ * (routerHook global component). Здесь остаётся:
+ *  - секция VersionPanel в «Версии и бета-версии»;
+ *  - очистка старого dock;
+ *  - подсказка маршрута / AppID для GlobalCard через route.ts.
  */
 
 import { getReactInstance } from 'millennium';
 
 import { api } from './lib/rpc';
 import { onRoute, rescanFromDom, startRouteTracking } from './lib/route';
-import { ConsentCard } from './ui/ConsentBanner';
 import { VersionPanel } from './ui/VersionPanel';
 
-// Кнопка справа снизу отключена. Оставляем только очистку на случай старых сессий.
 const removeDock = (): void => {
 	document.getElementById('version-rollback-dock')?.remove();
 	document.getElementById('version-rollback-dock-panel')?.remove();
-};
-const ensureDock = (): void => {
-	/* no-op */
 };
 
 const MARKERS = [
@@ -49,21 +33,9 @@ const MARKERS = [
 	'Приватные версии',
 ];
 
-/** Заголовок секции «Активность» — карточку ставим прямо над ним. */
-const ACTIVITY_MARKERS = ['Активность', 'Activity', 'Aktivität', 'Activité'];
-/** Блок «Небольшое обновление или список изменений» — запасной якорь. */
-const UPDATE_MARKERS = [
-	'Небольшое обновление или список изменений',
-	'Небольшое обновление',
-	'Minor update or change list',
-	'Minor update',
-];
-
 const HOST_ID = 'version-rollback-betas-host';
-const CONSENT_ID = 'version-rollback-consent-card';
 const SETTINGS_ROOT_ID = 'version-rollback-settings-root';
 const DEBOUNCE_MS = 400;
-/** Сколько подряд ошибок инъекции терпим, прежде чем отключиться на сессию. */
 const MAX_STRIKES = 5;
 
 type ReactDom = {
@@ -80,10 +52,6 @@ const note = (message: string) => {
 	api.debugNote(message).catch((): void => undefined);
 };
 
-/* ------------------------------------------------------------------ */
-/* Поиск маркера страницы «Версии и бета-версии» без layout-треша.     */
-/* ------------------------------------------------------------------ */
-
 const findMarker = (): HTMLElement | null => {
 	if (!document.body) return null;
 	const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
@@ -99,7 +67,6 @@ const findMarker = (): HTMLElement | null => {
 	return null;
 };
 
-/** AppID из React-пропсов ближайших родителей: у страницы свойств он рядом. */
 const findAppId = (from: HTMLElement): string | undefined => {
 	try {
 		let fiber = getReactInstance(from) as any;
@@ -118,12 +85,15 @@ const findAppId = (from: HTMLElement): string | undefined => {
 	return undefined;
 };
 
-/** Запасной способ узнать appid страницы игры: React-пропсы её контейнера. */
 const findLibraryAppId = (): string | undefined => {
 	try {
+		const href = String(location.href ?? '') + String(location.hash ?? '');
+		const m = href.match(/(?:#|\/)(?:app|details|library\/app)\/(\d{3,})/i) ?? href.match(/\/app\/(\d{3,})/);
+		if (m) return m[1];
 		const anchor =
 			document.querySelector<HTMLElement>('[class*="appdetailsoverview"]') ??
 			document.querySelector<HTMLElement>('[class*="libraryappdetails"]') ??
+			document.querySelector<HTMLElement>('[class*="AppDetails"]') ??
 			document.querySelector<HTMLElement>('[class*="appdetailsgamepad"]');
 		if (!anchor) return undefined;
 		return findAppId(anchor);
@@ -132,7 +102,6 @@ const findLibraryAppId = (): string | undefined => {
 	}
 };
 
-/** Контейнер страницы: поднимаемся от заголовка, пока не найдём блок с полем ввода кода. */
 const findPageContainer = (marker: HTMLElement): HTMLElement | null => {
 	let node: HTMLElement | null = marker.parentElement;
 	for (let depth = 0; node && depth < 6; depth++) {
@@ -142,21 +111,12 @@ const findPageContainer = (marker: HTMLElement): HTMLElement | null => {
 	return marker.parentElement;
 };
 
-/* ------------------------------------------------------------------ */
-/* Состояние инъекции.                                                 */
-/* ------------------------------------------------------------------ */
-
 let betasRoot: { unmount: () => void } | null = null;
 let betasHost: HTMLElement | null = null;
-let consentRoot: { unmount: () => void } | null = null;
 let observer: MutationObserver | null = null;
 let debounceTimer: number | null = null;
 let strikes = 0;
 let stopped = false;
-
-let consentCache: { consent: string; asked: boolean } | null = null;
-const knownCache = new Map<string, boolean>();
-let consentAppId: string | undefined;
 
 const unmountBetas = (): void => {
 	try {
@@ -167,16 +127,6 @@ const unmountBetas = (): void => {
 	betasRoot = null;
 	betasHost?.remove();
 	betasHost = null;
-};
-
-const unmountConsent = (): void => {
-	try {
-		consentRoot?.unmount();
-	} catch {
-		/* уже снят */
-	}
-	consentRoot = null;
-	document.getElementById(CONSENT_ID)?.remove();
 };
 
 const mountBetas = (marker: HTMLElement): void => {
@@ -214,114 +164,6 @@ const mountBetas = (marker: HTMLElement): void => {
 	}
 };
 
-/* ------------------------------------------------------------------ */
-/* Согласие на сбор: один вопрос за всё время.                         */
-/* ------------------------------------------------------------------ */
-
-/** Найти элемент по точному тексту (TreeWalker, без layout-треша). */
-const findTextElement = (markers: string[]): HTMLElement | null => {
-	if (!document.body) return null;
-	const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-	let node: Node | null = walker.nextNode();
-	while (node) {
-		const text = (node.nodeValue ?? '').trim();
-		if (text && text.length < 90 && markers.includes(text)) {
-			const parent = node.parentElement;
-			if (parent) return parent;
-		}
-		node = walker.nextNode();
-	}
-	return null;
-};
-
-/**
- * Согласие на сбор: один вопрос за всё время.
- *
- * Карточка вставляется в страницу библиотеки — между блоком «Небольшое
- * обновление или список изменений» и секцией «Активность». Если нужных
- * заголовков нет (другая вёрстка/язык) — карточка всё равно в потоке
- * (не floating-кнопка).
- */
-const showConsentCard = (appid: string): void => {
-	if (document.getElementById(CONSENT_ID)) return;
-	const dom = reactDom();
-	if (!dom?.createRoot) {
-		note('consent card skipped: no reactdom');
-		return;
-	}
-	const host = document.createElement('div');
-	host.id = CONSENT_ID;
-
-	const activity = findTextElement(ACTIVITY_MARKERS);
-	const update = findTextElement(UPDATE_MARKERS);
-	if (activity) {
-		host.style.cssText = 'margin:12px 0;';
-		activity.parentElement?.insertBefore(host, activity);
-	} else if (update?.parentElement) {
-		host.style.cssText = 'margin:12px 0;';
-		update.parentElement.insertAdjacentElement('afterend', host);
-	} else {
-		// без якоря — в конец body, но без fixed-кнопки
-		host.style.cssText = 'margin:12px 16px;';
-		document.body.appendChild(host);
-	}
-	try {
-		const root = dom.createRoot(host);
-		if (!root) throw new Error('createRoot вернул null');
-		root.render(
-			<ConsentCard
-				appid={appid}
-				onDone={() => {
-					consentCache = null;
-					window.setTimeout(() => unmountConsent(), 12000);
-				}}
-			/>,
-		);
-		consentRoot = root;
-		note('consent card shown for ' + appid + ' (anchor: ' + (activity ? 'activity' : update ? 'update' : 'body') + ')');
-	} catch (error) {
-		log('не удалось показать карточку согласия', String(error));
-		host.remove();
-	}
-};
-
-/**
- * Точка входа вопроса: игра, которой нет в общей базе версий.
- * Спрашиваем ровно один раз: ответ хранится в настройках Millennium
- * (collect_consent + consent_shown_for=scope-1).
- */
-const maybeAskConsent = (appid: string | undefined): void => {
-	if (!appid || consentAppId === appid || document.getElementById(CONSENT_ID)) return;
-	consentAppId = appid;
-
-	void (async () => {
-		try {
-			if (!consentCache) {
-				const state = await api.getConsent();
-				consentCache = { consent: String(state?.consent ?? ''), asked: Boolean(state?.asked) };
-			}
-			if (consentCache.asked) return;
-			if (knownCache.has(appid)) return;
-			const known = await api.appKnown(appid);
-			knownCache.set(appid, Boolean(known?.known));
-			if (known?.known) return;
-			showConsentCard(appid);
-		} catch (error) {
-			consentAppId = undefined;
-			log('проверка согласия отложена', String(error));
-		}
-	})();
-};
-
-window.addEventListener('vrb-consent-changed', () => {
-	consentCache = null;
-	consentAppId = undefined;
-});
-
-/* ------------------------------------------------------------------ */
-/* Главный цикл реакции на DOM.                                        */
-/* ------------------------------------------------------------------ */
-
 const refresh = (): void => {
 	if (stopped) return;
 	try {
@@ -330,11 +172,10 @@ const refresh = (): void => {
 		if (document.getElementById(SETTINGS_ROOT_ID)) {
 			removeDock();
 			unmountBetas();
-			unmountConsent();
 			return;
 		}
 
-		ensureDock();
+		removeDock();
 
 		const marker = findMarker();
 		if (marker) {
@@ -348,7 +189,6 @@ const refresh = (): void => {
 
 		const domAppId = marker ? findAppId(marker) : findLibraryAppId();
 		rescanFromDom(domAppId, Boolean(marker));
-		maybeAskConsent(domAppId ?? undefined);
 
 		strikes = 0;
 	} catch (error) {
@@ -358,7 +198,6 @@ const refresh = (): void => {
 			stopped = true;
 			observer?.disconnect();
 			observer = null;
-			unmountConsent();
 			note('injection disabled after ' + String(MAX_STRIKES) + ' strikes: ' + String(error).slice(0, 200));
 		}
 	}
@@ -373,12 +212,10 @@ const scheduleRefresh = (): void => {
 	}, DEBOUNCE_MS);
 };
 
-/** Единственная точка входа инъекций. Вызывается из index.tsx один раз. */
 export const startUi = (): void => {
 	if (observer || stopped) return;
 	startRouteTracking();
-	onRoute((route) => {
-		if (route.appid) maybeAskConsent(route.appid);
+	onRoute(() => {
 		scheduleRefresh();
 	});
 
@@ -389,10 +226,9 @@ export const startUi = (): void => {
 
 	window.setTimeout(scheduleRefresh, 1500);
 	window.setTimeout(scheduleRefresh, 6000);
-	note('inject start (observer mode, dock disabled)');
+	note('inject start 0.6.2 (consent only via GlobalCard)');
 };
 
-/** Полная остановка: выгрузка плагина / перезапуск UI. */
 export const stopUi = (): void => {
 	stopped = true;
 	observer?.disconnect();
@@ -400,13 +236,9 @@ export const stopUi = (): void => {
 	if (debounceTimer !== null) window.clearTimeout(debounceTimer);
 	debounceTimer = null;
 	unmountBetas();
-	unmountConsent();
 	removeDock();
 };
 
-/** Для настроек плагина: сбросить кэш согласия, чтобы карточка перечиталась. */
 export const invalidateConsentCache = (): void => {
-	consentCache = null;
-	consentAppId = undefined;
 	window.dispatchEvent(new Event('vrb-consent-changed'));
 };
