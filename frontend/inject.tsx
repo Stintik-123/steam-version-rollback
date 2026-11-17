@@ -15,6 +15,8 @@
  *  - любое монтирование обёрнуто в try/catch, а после нескольких подряд
  *    ошибок инъекция сама отключается на сессию и пишет диагностику, вместо
  *    того чтобы молотить по хосту.
+ *
+ * 0.6.1: кнопку справа снизу (dock) отключили — ensureDock = no-op.
  */
 
 import { getReactInstance } from 'millennium';
@@ -22,8 +24,16 @@ import { getReactInstance } from 'millennium';
 import { api } from './lib/rpc';
 import { onRoute, rescanFromDom, startRouteTracking } from './lib/route';
 import { ConsentCard } from './ui/ConsentBanner';
-import { ensureDock, removeDock } from './ui/dock';
 import { VersionPanel } from './ui/VersionPanel';
+
+// Кнопка справа снизу отключена. Оставляем только очистку на случай старых сессий.
+const removeDock = (): void => {
+	document.getElementById('version-rollback-dock')?.remove();
+	document.getElementById('version-rollback-dock-panel')?.remove();
+};
+const ensureDock = (): void => {
+	/* no-op */
+};
 
 const MARKERS = [
 	'Скрытые версии',
@@ -229,14 +239,13 @@ const findTextElement = (markers: string[]): HTMLElement | null => {
  *
  * Карточка вставляется в страницу библиотеки — между блоком «Небольшое
  * обновление или список изменений» и секцией «Активность». Если нужных
- * заголовков нет (другая вёрстка/язык) — остаётся плавающий вариант
- * в правом нижнем углу.
+ * заголовков нет (другая вёрстка/язык) — карточка всё равно в потоке
+ * (не floating-кнопка).
  */
 const showConsentCard = (appid: string): void => {
 	if (document.getElementById(CONSENT_ID)) return;
 	const dom = reactDom();
 	if (!dom?.createRoot) {
-		// Без React вопрос можно задать в настройках плагина — не падаем.
 		note('consent card skipped: no reactdom');
 		return;
 	}
@@ -246,11 +255,14 @@ const showConsentCard = (appid: string): void => {
 	const activity = findTextElement(ACTIVITY_MARKERS);
 	const update = findTextElement(UPDATE_MARKERS);
 	if (activity) {
-		// Идёт в поток страницы: между «Небольшое обновление» и «Активность».
 		host.style.cssText = 'margin:12px 0;';
 		activity.parentElement?.insertBefore(host, activity);
+	} else if (update?.parentElement) {
+		host.style.cssText = 'margin:12px 0;';
+		update.parentElement.insertAdjacentElement('afterend', host);
 	} else {
-		host.style.cssText = 'position:fixed;right:24px;bottom:84px;z-index:2147483647;width:360px;';
+		// без якоря — в конец body, но без fixed-кнопки
+		host.style.cssText = 'margin:12px 16px;';
 		document.body.appendChild(host);
 	}
 	try {
@@ -266,7 +278,7 @@ const showConsentCard = (appid: string): void => {
 			/>,
 		);
 		consentRoot = root;
-		note('consent card shown for ' + appid + ' (anchor: ' + (activity ? 'activity' : update ? 'update' : 'floating') + ')');
+		note('consent card shown for ' + appid + ' (anchor: ' + (activity ? 'activity' : update ? 'update' : 'body') + ')');
 	} catch (error) {
 		log('не удалось показать карточку согласия', String(error));
 		host.remove();
@@ -288,14 +300,13 @@ const maybeAskConsent = (appid: string | undefined): void => {
 				const state = await api.getConsent();
 				consentCache = { consent: String(state?.consent ?? ''), asked: Boolean(state?.asked) };
 			}
-			if (consentCache.asked) return; // уже отвечали — не переспрашиваем
+			if (consentCache.asked) return;
 			if (knownCache.has(appid)) return;
 			const known = await api.appKnown(appid);
 			knownCache.set(appid, Boolean(known?.known));
-			if (known?.known) return; // игра уже в базе — собирать нечего
+			if (known?.known) return;
 			showConsentCard(appid);
 		} catch (error) {
-			// Бэкенд недоступен — не показываем карточку, попробуем на другой игре.
 			consentAppId = undefined;
 			log('проверка согласия отложена', String(error));
 		}
@@ -316,7 +327,6 @@ const refresh = (): void => {
 	try {
 		if (!document.body) return;
 
-		// Открыты настройки плагина — там свой UI, инъекции не нужны.
 		if (document.getElementById(SETTINGS_ROOT_ID)) {
 			removeDock();
 			unmountBetas();
@@ -326,7 +336,6 @@ const refresh = (): void => {
 
 		ensureDock();
 
-		// Секция «Версии и бета-версии» в свойствах игры.
 		const marker = findMarker();
 		if (marker) {
 			if (!betasHost || !document.contains(betasHost)) {
@@ -337,7 +346,6 @@ const refresh = (): void => {
 			unmountBetas();
 		}
 
-		// Согласие: appid берём из навигации, затем из DOM-сигналов.
 		const domAppId = marker ? findAppId(marker) : findLibraryAppId();
 		rescanFromDom(domAppId, Boolean(marker));
 		maybeAskConsent(domAppId ?? undefined);
@@ -379,10 +387,9 @@ export const startUi = (): void => {
 		observer.observe(document.body, { childList: true, subtree: true });
 	}
 
-	// Первая отрисовка Steam может запаздывать: две разовые попытки, не интервал.
 	window.setTimeout(scheduleRefresh, 1500);
 	window.setTimeout(scheduleRefresh, 6000);
-	note('inject start (observer mode)');
+	note('inject start (observer mode, dock disabled)');
 };
 
 /** Полная остановка: выгрузка плагина / перезапуск UI. */
