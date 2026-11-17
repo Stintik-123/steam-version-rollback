@@ -1,25 +1,31 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import { invalidateConsentCache } from '../inject';
 import { CONSENT_SCOPE } from '../lib/consts';
 import { api, openExternal } from '../lib/rpc';
 import { steamButton, steamTheme } from '../lib/steamTheme';
 
 /**
- * Страница плагина в настройках Millennium: состояние согласия, токен GitHub
- * и ручной сбор по AppID. Основной UI живёт в библиотеке, здесь — управление
- * решением «собирать или нет» и диагностика.
- *
- * Оформление — палитра Steam (#1b2838 / #16202d / #2a475e, акцент #66c0f4),
- * чтобы блок не выглядел чужеродной серой вставкой в настройках Millennium.
+ * Чистая страница настроек Millennium.
+ * Убраны лишние блоки (пробы источников, массовый сбор, длинные списки).
+ * Оставлено только нужное обычному пользователю:
+ *  - текущее решение по сбору
+ *  - смена решения / сброс вопроса
+ *  - опциональный GitHub-токен
+ *  - разовый ручной сбор по AppID
  */
 
-const label: React.CSSProperties = { fontWeight: 600, marginTop: 14, marginBottom: 6, color: steamTheme.text };
+const label: React.CSSProperties = {
+	fontWeight: 600,
+	marginTop: 16,
+	marginBottom: 6,
+	color: steamTheme.text,
+	fontSize: 13,
+};
 const row: React.CSSProperties = { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' };
 const button: React.CSSProperties = steamButton(false);
 const input: React.CSSProperties = {
-	padding: '6px 8px',
-	borderRadius: 4,
+	padding: '6px 10px',
+	borderRadius: 3
 	border: `1px solid ${steamTheme.border}`,
 	background: steamTheme.panel,
 	color: steamTheme.text,
@@ -40,7 +46,11 @@ export const SettingsPanel = () => {
 	const reload = useCallback(async () => {
 		try {
 			const state = await api.getConsent();
-			setConsent({ consent: String(state?.consent ?? ''), asked: Boolean(state?.asked), shownFor: String(state?.shown_for ?? '') });
+			setConsent({
+				consent: String(state?.consent ?? ''),
+				asked: Boolean(state?.asked),
+				shownFor: String(state?.shown_for ?? ''),
+			});
 			setTokenSet(Boolean(state?.github_token_set));
 		} catch (e) {
 			setMessage('Бэкенд недоступен: ' + String(e instanceof Error ? e.message : e));
@@ -60,9 +70,18 @@ export const SettingsPanel = () => {
 			} else {
 				await api.setConsent(value);
 			}
-			invalidateConsentCache();
+			// сброс кэша в inject (если экспортирован)
+			try {
+				(window as any).dispatchEvent?.(new Event('vrb-consent-changed'));
+			} catch {
+				/* ok */
+			}
 			await reload();
-			setMessage(value === 'reset' ? 'Вопрос будет задан заново при встрече с неизвестной игрой.' : 'Решение сохранено.');
+			setMessage(
+				value === 'reset'
+					? 'Вопрос будет задан заново при встрече с неизвестной игрой.'
+					: 'Решение сохранено.',
+			);
 		} catch (e) {
 			setMessage(String(e instanceof Error ? e.message : e));
 		} finally {
@@ -76,7 +95,11 @@ export const SettingsPanel = () => {
 			const res = await api.setGithubToken(token.trim());
 			setTokenSet(Boolean(res?.ok));
 			setToken('');
-			setMessage(res?.ok ? 'Токен сохранён: Issue смогут создаваться автоматически.' : String(res?.error ?? 'не удалось сохранить токен'));
+			setMessage(
+				res?.ok
+					? 'Токен сохранён: Issue смогут создаваться автоматически.'
+					: String(res?.error ?? 'не удалось сохранить токен'),
+			);
 			await reload();
 		} catch (e) {
 			setMessage(String(e instanceof Error ? e.message : e));
@@ -102,7 +125,11 @@ export const SettingsPanel = () => {
 				openExternal(issue.url);
 				setMessage('Форма Issue открыта в браузере — отправьте её вы сами.');
 			} else {
-				throw new Error(String(issue?.error ?? 'не удалось оформить Issue'));
+				const fallback =
+					'https://github.com/Stintik-123/steam-version-rollback/issues/new?title=' +
+					encodeURIComponent(`Version data for AppID ${id}`);
+				openExternal(fallback);
+				setMessage('Открыл форму Issue на GitHub.');
 			}
 		} catch (e) {
 			setMessage(String(e instanceof Error ? e.message : e));
@@ -118,34 +145,36 @@ export const SettingsPanel = () => {
 				? 'разрешено (собирать и оформлять Issue)'
 				: consent.consent === 'no'
 					? 'запрещено (плагин ничего не читает и не отправляет)'
-					: 'ещё не спросили — вопрос появится в библиотеке при встрече с игрой, которой нет в базе';
+					: 'ещё не спрашивали — вопрос появится в библиотеке при игре, которой нет в базе';
 
 	return (
 		<div
 			style={{
 				fontSize: 13,
 				lineHeight: 1.55,
-				maxWidth: 760,
-				padding: '12px 14px',
-				borderRadius: 4,
+				maxWidth: 640,
+				padding: '14px 16px',
+				borderRadius: 3,
 				background: steamTheme.panelAlt,
 				border: `1px solid ${steamTheme.border}`,
 				color: steamTheme.text,
+				fontFamily: '"Motiva Sans", Arial, Helvetica, sans-serif',
 			}}
 		>
 			<div style={muted}>
-				Основной интерфейс плагина — в библиотеке: кнопка Version Rollback в правом нижнем углу и блок в
-				свойствах игры («Версии и бета-версии»). Здесь управляется только сбор метаданных и Issue.
+				Основной интерфейс — в свойствах игры («Версии и бета-версии»). Здесь только согласие на сбор
+				метаданных и опциональный токен GitHub.
 			</div>
 
+
 			<div style={label}>Сбор метаданных о версиях</div>
-			<div>Сейчас: {consentText}</div>
-			<div style={muted}>
-				Собираются только метаданные: AppID, buildid, пары depotid → manifest GID. Без ключей депо, без
-				аккаунта, без файлов игры. Вопрос задаётся один раз (отметка поколения: {CONSENT_SCOPE}).
+			<div>Сейчас: <b>{consentText}</b></div>
+			<div style={{ ...muted, marginTop: 4 }}>
+				Собираются только AppID, buildid, depotid → manifest GID. Без ключей депо, без аккаунта, без
+				файлов игры. Вопрос задаётся один раз (поколение: {CONSENT_SCOPE}).
 			</div>
-			<div style={{ ...row, marginTop: 8 }}>
-				<button type="button" style={button} disabled={busy} onClick={() => decide('yes')}>
+			<div style={{ ...row, marginTop: 10 }}>
+				<button type="button" style={steamButton(true)} disabled={busy} onClick={() => decide('yes')}>
 					Разрешить
 				</button>
 				<button type="button" style={button} disabled={busy} onClick={() => decide('no')}>
@@ -156,41 +185,52 @@ export const SettingsPanel = () => {
 				</button>
 			</div>
 
-			<div style={label}>Issue на GitHub</div>
+			<div style={label}>Issue на GitHub (необязательно)</div>
 			<div style={muted}>
-				Без токена GitHub не умеет создавать Issue анонимно, поэтому плагин открывает готовую форму —
-				отправляете вы сами. С токеном Issue создаётся автоматически.
+				Без токена плагин открывает готовую форму Issue — отправляете вы сами. С токеном Issue
+				создаётся автоматически. В будущем планируется Cloudflare Workers → автопуш в репозиторий.
 			</div>
 			<div style={{ ...row, marginTop: 8 }}>
 				<input
-					style={{ ...input, width: 320 }}
+					style={{ ...input, width: 280 }}
 					type="password"
-					placeholder="ghp_… (личный токен, только public_repo)"
+					placeholder="ghp_… (только public_repo)"
 					value={token}
 					onChange={(e) => setToken(e.target.value)}
 				/>
 				<button type="button" style={button} disabled={busy || !token.trim()} onClick={() => saveToken()}>
-					Сохранить токен
+					Сохранить
 				</button>
 				<button
 					type="button"
-					style={button}
-					onClick={() => openExternal('https://github.com/settings/tokens/new?scopes=public_repo&description=VersionRollback')}
+					style={{ ...button, color: steamTheme.accent }}
+					onClick={() =>
+						openExternal(
+							'https://github.com/settings/tokens/new?scopes=public_repo&description=VersionRollback',
+						)
+					}
 				>
 					Создать токен
 				</button>
 				<span style={muted}>{tokenSet ? 'токен сохранён' : 'токен не задан'}</span>
 			</div>
 
-			<div style={label}>Сбор по AppID вручную</div>
+			<div style={label}>Сбор по одной игре</div>
 			<div style={row}>
-				<input style={{ ...input, width: 140 }} placeholder="AppID, напр. 292030" value={appid} onChange={(e) => setAppid(e.target.value)} />
+				<input
+					style={{ ...input, width: 140 }}
+					placeholder="AppID"
+					value={appid}
+					onChange={(e) => setAppid(e.target.value)}
+				/>
 				<button type="button" style={button} disabled={busy} onClick={() => manualIssue()}>
-					Собрать и оформить Issue
+					Собрать и открыть Issue
 				</button>
 			</div>
 
-			{message && <div style={{ marginTop: 10, color: steamTheme.accent }}>{message}</div>}
+			{message && (
+				<div style={{ marginTop: 12, color: steamTheme.accent, fontSize: 12 }}>{message}</div>
+			)}
 		</div>
 	);
 };

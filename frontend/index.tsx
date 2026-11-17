@@ -1,26 +1,17 @@
 /**
- * Version Rollback — точка входа фронтенда (starlight / millennium.toml).
+ * Version Rollback — точка входа фронтенда.
  *
- * Правила starlight, которые важно не нарушать:
- *   - `definePlugin` возвращает { title, icon, content }, icon обязателен;
- *   - функции, вызываемые из Lua через millennium.call_frontend_method,
- *     помечаются `/** @ffi *\\/` и экспортируются именно из этого файла;
- *   - у параметров @ffi-функций должен быть явный тип.
- *
- * Правила стабильности (после краха 0xC0000409 в 0.5.x):
- *   - при загрузке бандла НЕ делается ничего, кроме регистрации плагина и
- *     отложенного старта инъекций (inject.tsx) — никаких интервалов и RPC
- *     в момент старта Steam;
- *   - все RPC идут последовательной очередью с таймаутами (lib/rpc.ts);
- *   - любая ошибка инъекции ловится локально и не может уронить ни окно
- *     Steam, ни Lua-хост.
+ * Изменения относительно 0.6.0:
+ *  - GlobalDock (кнопка справа снизу) отключён.
+ *  - Карточка согласия остаётся глобальной и встаёт в поток страницы игры
+ *    между блоком обновления и «Активность» (как штатные баннеры Steam).
  */
 
 import { definePlugin, routerHook } from 'millennium';
 
 import { startUi, stopUi } from './inject';
 import { api } from './lib/rpc';
-import { GlobalCard, GlobalDock } from './ui/GlobalCard';
+import { GlobalCard } from './ui/GlobalCard';
 import { SettingsPanel } from './ui/SettingsPanel';
 
 type SteamConsole = {
@@ -28,11 +19,6 @@ type SteamConsole = {
 	System?: { ExecCommand?: (command: string) => void };
 };
 
-/**
- * Единственный путь выполнить консольную команду Steam (`download_depot`).
- * Из Lua это невозможно — команда живёт в JS-контексте клиента.
- * Возвращаем boolean, чтобы бэкенд отличил «команда отправлена» от «API нет».
- */
 /** @ffi */
 export function execConsole(command: string): boolean {
 	const sc = (globalThis as unknown as { SteamClient?: SteamConsole }).SteamClient;
@@ -59,16 +45,10 @@ const Icon = () => (
 	</svg>
 );
 
-/**
- * Видимый слой рендерим глобальным компонентом Millennium: бандл плагина
- * грузится в SharedJSContext (служебное невидимое окно), и вставленный туда
- * DOM пользователю не виден. Глобальный компонент монтируется в настоящем
- * окне Steam — там карточка и встаёт между «Небольшое обновление» и «Активность».
- */
 try {
+	// Только карточка согласия. Dock больше не регистрируем.
 	routerHook.addGlobalComponent('version-rollback-consent-card', GlobalCard);
-	routerHook.addGlobalComponent('version-rollback-dock', GlobalDock);
-	console.info('[Version Rollback] глобальные компоненты зарегистрированы');
+	console.info('[Version Rollback] глобальные компоненты зарегистрированы (без dock)');
 } catch (error) {
 	console.error('[Version Rollback] routerHook недоступен:', error);
 }
@@ -83,8 +63,6 @@ export default definePlugin(() => ({
 	),
 }));
 
-/* Старт инъекций — отложенный и одноразовый: Steam в момент загрузки бандла
- * ещё дорисовывает окно, а нам незачем быть первыми. */
 let started = false;
 const startOnce = (): void => {
 	if (started) return;
@@ -102,48 +80,21 @@ if (typeof requestIdleCallback === 'function') {
 	window.setTimeout(startOnce, 2500);
 }
 
-/* Разовая самопроверка связи с бэкендом — для диагностики, без интервалов. */
 window.setTimeout(() => {
 	api
 		.ping()
 		.then((result) => {
 			console.info('[Version Rollback] backend ok ' + JSON.stringify(result));
-			try {
-				localStorage.setItem('vrb-probe', 'ok ' + JSON.stringify(result));
-			} catch {
-				/* игнорируем */
-			}
 		})
 		.catch((error) => {
 			console.error('[Version Rollback] backend недоступен: ' + String(error));
-			try {
-				localStorage.setItem('vrb-probe', 'fail ' + String(error));
-			} catch {
-				/* игнорируем */
-			}
 		});
 }, 8000);
 
-/* Диагностика контекста: в каком окне живёт фронтенд и что видно в DOM. */
-window.setTimeout(() => {
-	const info = {
-		title: document.title,
-		href: String(location.href).slice(0, 120),
-		ready: document.readyState,
-		bodyText: (document.body?.innerText ?? '').slice(0, 120).replace(/\s+/g, ' '),
-		hasActivity: (document.body?.innerText ?? '').includes('Активность'),
-		hasUpdate: (document.body?.innerText ?? '').includes('Небольшое обновление'),
-		iframes: document.querySelectorAll('iframe').length,
-		w: window.innerWidth,
-	};
-	api.debugNote('ctx ' + JSON.stringify(info)).catch((): void => undefined);
-}, 5000);
-
-/* Чистый выход: снять корни и observer при перезапуске UI/выгрузке плагина. */
 window.addEventListener('beforeunload', () => {
 	try {
 		stopUi();
 	} catch {
-		/* игнорируем */
+		/* ignore */
 	}
 });
