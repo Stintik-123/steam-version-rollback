@@ -25,6 +25,7 @@ const MODULES = [
 	['localcache', 'lib/localcache.lua'],
 	['steamraw', 'lib/steamraw.lua'],
 	['steamcounts', 'lib/steamcounts.lua'],
+	['appdb', 'lib/appdb.lua'],
 	['versiondb', 'lib/versiondb.lua'],
 	['collector', 'lib/collector.lua'],
 	['plan', 'lib/plan.lua'],

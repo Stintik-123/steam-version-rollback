@@ -39,6 +39,16 @@ const MARKERS = [
 	'Приватные версии',
 ];
 
+/** Заголовок секции «Активность» — карточку ставим прямо над ним. */
+const ACTIVITY_MARKERS = ['Активность', 'Activity', 'Aktivität', 'Activité'];
+/** Блок «Небольшое обновление или список изменений» — запасной якорь. */
+const UPDATE_MARKERS = [
+	'Небольшое обновление или список изменений',
+	'Небольшое обновление',
+	'Minor update or change list',
+	'Minor update',
+];
+
 const HOST_ID = 'version-rollback-betas-host';
 const CONSENT_ID = 'version-rollback-consent-card';
 const SETTINGS_ROOT_ID = 'version-rollback-settings-root';
@@ -198,6 +208,30 @@ const mountBetas = (marker: HTMLElement): void => {
 /* Согласие на сбор: один вопрос за всё время.                         */
 /* ------------------------------------------------------------------ */
 
+/** Найти элемент по точному тексту (TreeWalker, без layout-треша). */
+const findTextElement = (markers: string[]): HTMLElement | null => {
+	if (!document.body) return null;
+	const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+	let node: Node | null = walker.nextNode();
+	while (node) {
+		const text = (node.nodeValue ?? '').trim();
+		if (text && text.length < 90 && markers.includes(text)) {
+			const parent = node.parentElement;
+			if (parent) return parent;
+		}
+		node = walker.nextNode();
+	}
+	return null;
+};
+
+/**
+ * Согласие на сбор: один вопрос за всё время.
+ *
+ * Карточка вставляется в страницу библиотеки — между блоком «Небольшое
+ * обновление или список изменений» и секцией «Активность». Если нужных
+ * заголовков нет (другая вёрстка/язык) — остаётся плавающий вариант
+ * в правом нижнем углу.
+ */
 const showConsentCard = (appid: string): void => {
 	if (document.getElementById(CONSENT_ID)) return;
 	const dom = reactDom();
@@ -208,8 +242,17 @@ const showConsentCard = (appid: string): void => {
 	}
 	const host = document.createElement('div');
 	host.id = CONSENT_ID;
-	host.style.cssText = 'position:fixed;right:24px;bottom:84px;z-index:2147483647;';
-	document.body.appendChild(host);
+
+	const activity = findTextElement(ACTIVITY_MARKERS);
+	const update = findTextElement(UPDATE_MARKERS);
+	if (activity) {
+		// Идёт в поток страницы: между «Небольшое обновление» и «Активность».
+		host.style.cssText = 'margin:12px 0;';
+		activity.parentElement?.insertBefore(host, activity);
+	} else {
+		host.style.cssText = 'position:fixed;right:24px;bottom:84px;z-index:2147483647;width:360px;';
+		document.body.appendChild(host);
+	}
 	try {
 		const root = dom.createRoot(host);
 		if (!root) throw new Error('createRoot вернул null');
@@ -223,7 +266,7 @@ const showConsentCard = (appid: string): void => {
 			/>,
 		);
 		consentRoot = root;
-		note('consent card shown for ' + appid);
+		note('consent card shown for ' + appid + ' (anchor: ' + (activity ? 'activity' : update ? 'update' : 'floating') + ')');
 	} catch (error) {
 		log('не удалось показать карточку согласия', String(error));
 		host.remove();

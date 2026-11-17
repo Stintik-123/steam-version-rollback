@@ -33,6 +33,7 @@ const SOURCES: SourceRow[] = [
 	{ name: 'SteamRaw', gives: 'сборки + история изменений AppInfo', status: 'подключён: история и манифесты', url: 'https://steamraw.com' },
 	{ name: 'api.steamcmd.net', gives: 'текущие депо, ветки, манифесты', status: 'подключён: текущее состояние', url: 'https://api.steamcmd.net' },
 	{ name: 'SteamCounts', gives: 'датированные обновления, changelist, текущие GID', status: 'подключён: второй источник и перекрёстная проверка', url: 'https://steamcounts.info' },
+	{ name: 'steam-appdb (Austrum-lab)', gives: 'каталог всех AppID: игры, выделенные серверы, ПО', status: 'подключён: поиск игры по названию → AppID', url: 'https://github.com/Austrum-lab/steam-appdb' },
 	{ name: 'SteamDB', gives: 'самая длинная история', status: 'только вручную: API нет, автопарсинг запрещён', url: 'https://steamdb.info' },
 	{ name: 'opensteamdb-api', gives: 'объединённый API (steam-pics + манифесты)', status: 'не подключён: сервер self-host, публичного нет' },
 	{ name: 'ManifestHub / SteamTools', gives: 'ключи депо', status: 'не подключён намеренно: это обход прав' },
@@ -77,6 +78,9 @@ export const VersionPanel = ({ appidHint, context }: { appidHint?: string; conte
 	const [exportPath, setExportPath] = useState('');
 	const [sc, setSc] = useState<SteamCountsResult | null>(null);
 	const [scBusy, setScBusy] = useState(false);
+	const [appQuery, setAppQuery] = useState('');
+	const [appdbResults, setAppdbResults] = useState<{ appid: string; name: string }[]>([]);
+	const [appdbBusy, setAppdbBusy] = useState(false);
 	const [sourcesProbe, setSourcesProbe] = useState<SourcesProbeResult | null>(null);
 	const [probeBusy, setProbeBusy] = useState(false);
 	const [consent, setConsent] = useState('');
@@ -266,6 +270,25 @@ export const VersionPanel = ({ appidHint, context }: { appidHint?: string; conte
 			setMessage(result.ok ? `отчёт сохранён: ${result.path} (записей: ${result.count ?? 0})` : (result.error ?? 'не выгрузилось'));
 		} catch (error) {
 			fail(error);
+		}
+	};
+
+	// Каталог AppID из steam-appdb: ищем игру по названию.
+	const runAppdbSearch = async (force = false) => {
+		setAppdbBusy(true);
+		try {
+			const result = (await api.appdbSearch(appQuery, force)) as { ok: boolean; error?: string; results?: { appid: string; name: string }[] };
+			if (!result?.ok) {
+				setAppdbResults([]);
+				setMessage(result?.error ?? 'steam-appdb недоступен');
+				return;
+			}
+			setAppdbResults(asArray(result.results));
+			setMessage(`steam-appdb: найдено ${asArray(result.results).length}`);
+		} catch (error) {
+			fail(error);
+		} finally {
+			setAppdbBusy(false);
 		}
 	};
 
@@ -505,6 +528,49 @@ export const VersionPanel = ({ appidHint, context }: { appidHint?: string; conte
 			</Field>
 
 			<TextField label="AppID" value={appid} onChange={(e) => setAppid(e.currentTarget.value.trim())} mustBeNumeric description="например 1091500" />
+
+			<Field label="Поиск игры по названию" description="steam-appdb: открытая база всех AppID (игры, выделенные серверы, ПО)" bottomSeparator="standard">
+				<div style={styles.row}>
+					<input
+						style={{
+							padding: '6px 8px',
+							borderRadius: 4,
+							border: '1px solid rgba(255,255,255,.25)',
+							background: 'rgba(0,0,0,.35)',
+							color: 'inherit',
+							font: 'inherit',
+							minWidth: 220,
+						}}
+						placeholder="например Team Fortress 2"
+						value={appQuery}
+						onChange={(e) => setAppQuery(e.currentTarget.value)}
+					/>
+					<DialogButton onClick={() => runAppdbSearch()} disabled={busy || appdbBusy || !appQuery.trim()}>
+						{appdbBusy ? 'Ищу…' : 'Найти AppID'}
+					</DialogButton>
+					<DialogButton onClick={() => runAppdbSearch(true)} disabled={busy || appdbBusy || !appQuery.trim()}>						Обновить базу
+					</DialogButton>
+				</div>
+				{appdbResults.length > 0 && (
+					<div style={{ ...styles.mono, marginTop: '8px' }}>
+						{appdbResults.map((r) => (
+							<div key={r.appid}>
+								<button
+									type="button"
+									style={{ background: 'none', border: 'none', color: '#66c0f4', cursor: 'pointer', padding: 0, font: 'inherit' }}
+									onClick={() => {
+										setAppid(r.appid);
+										setAppQuery(r.name);
+									}}
+								>
+									{r.name}
+								</button>{' '}
+								— AppID {r.appid}
+							</div>
+						))}
+					</div>
+				)}
+			</Field>
 
 			<Field label="Данные депо" description="api.steamcmd.net, кэш 6 часов" bottomSeparator="standard">
 				<DialogButton onClick={() => loadApp(false)} disabled={busy}>Подтянуть</DialogButton>

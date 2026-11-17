@@ -16,10 +16,11 @@
  *     Steam, ни Lua-хост.
  */
 
-import { definePlugin } from 'millennium';
+import { definePlugin, routerHook } from 'millennium';
 
 import { startUi, stopUi } from './inject';
 import { api } from './lib/rpc';
+import { GlobalCard, GlobalDock } from './ui/GlobalCard';
 import { SettingsPanel } from './ui/SettingsPanel';
 
 type SteamConsole = {
@@ -57,6 +58,20 @@ const Icon = () => (
 		<path d="M7.2 4.6h1.6v3.9l2.6 1.5-.8 1.4-3.4-2V4.6Z" />
 	</svg>
 );
+
+/**
+ * Видимый слой рендерим глобальным компонентом Millennium: бандл плагина
+ * грузится в SharedJSContext (служебное невидимое окно), и вставленный туда
+ * DOM пользователю не виден. Глобальный компонент монтируется в настоящем
+ * окне Steam — там карточка и встаёт между «Небольшое обновление» и «Активность».
+ */
+try {
+	routerHook.addGlobalComponent('version-rollback-consent-card', GlobalCard);
+	routerHook.addGlobalComponent('version-rollback-dock', GlobalDock);
+	console.info('[Version Rollback] глобальные компоненты зарегистрированы');
+} catch (error) {
+	console.error('[Version Rollback] routerHook недоступен:', error);
+}
 
 export default definePlugin(() => ({
 	title: 'Version Rollback',
@@ -108,6 +123,21 @@ window.setTimeout(() => {
 			}
 		});
 }, 8000);
+
+/* Диагностика контекста: в каком окне живёт фронтенд и что видно в DOM. */
+window.setTimeout(() => {
+	const info = {
+		title: document.title,
+		href: String(location.href).slice(0, 120),
+		ready: document.readyState,
+		bodyText: (document.body?.innerText ?? '').slice(0, 120).replace(/\s+/g, ' '),
+		hasActivity: (document.body?.innerText ?? '').includes('Активность'),
+		hasUpdate: (document.body?.innerText ?? '').includes('Небольшое обновление'),
+		iframes: document.querySelectorAll('iframe').length,
+		w: window.innerWidth,
+	};
+	api.debugNote('ctx ' + JSON.stringify(info)).catch((): void => undefined);
+}, 5000);
 
 /* Чистый выход: снять корни и observer при перезапуске UI/выгрузке плагина. */
 window.addEventListener('beforeunload', () => {

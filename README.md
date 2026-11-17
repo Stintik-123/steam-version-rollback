@@ -84,6 +84,7 @@ npm run build         # output_path = "auto" в millennium.toml
 | api.steamcmd.net | текущие депо и манифесты веток | только «сейчас», без истории |
 | SteamRaw (`/api/app/<id>/builds`, `/history`) | сборки и изменения `depots.<depot>.manifests.<branch>.gid` | история только с сентября 2026, без ключа, просят кэш и User-Agent |
 | SteamCounts (`/app/<id>`, таблицы Updates и Depots) | датированные обновления (старая → новая сборка, ветка, changelist) и текущие GID по депо | публичного API нет: страница разбирается как есть; снимков манифестов старых сборок не даёт |
+| steam-appdb (Austrum-lab) | открытая база всех AppID: игры, выделенные серверы, ПО | каталог AppID, а не история версий; поиск игры по названию → AppID |
 | локальный `appmanifest` | что реально стоит и куда качать | только текущая установка |
 | локальный кэш (`logs/content_log.txt`, `steamapps/depotcache/*.manifest`) | какие манифесты Steam уже видел на этом компьютере — в том числе для сборок старше истории SteamRaw | только то, что осталось на диске; `content_log.txt` пишется не всегда |
 | общая база версий (`resources/versions-db.json`) | сборки и снимки манифестов, накопленные заранее и дополненные локальным сбором | метаданные без ключей депо; пополняется вручную |
@@ -212,6 +213,7 @@ backend/lib/appinfo.lua api.steamcmd.net: депо, ветки, манифест
 backend/lib/steamraw.lua SteamRaw: сборки и история изменений AppInfo
 backend/lib/localcache.lua локальный кэш Steam + разбор вручную вставленных GID
 backend/lib/steamcounts.lua SteamCounts: датированные обновления и текущие GID
+backend/lib/appdb.lua      steam-appdb: каталог AppID, поиск игры по названию
 backend/lib/versiondb.lua  общая+локальная база версий: сборки и манифесты
 backend/lib/collector.lua сбор по всем играм + отчёт для GitHub Issue
 backend/lib/plan.lua    чистая логика выбора депо и манифестов

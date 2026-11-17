@@ -3,33 +3,29 @@ import { useCallback, useEffect, useState } from 'react';
 import { invalidateConsentCache } from '../inject';
 import { CONSENT_SCOPE } from '../lib/consts';
 import { api, openExternal } from '../lib/rpc';
+import { steamButton, steamTheme } from '../lib/steamTheme';
 
 /**
  * Страница плагина в настройках Millennium: состояние согласия, токен GitHub
  * и ручной сбор по AppID. Основной UI живёт в библиотеке, здесь — управление
  * решением «собирать или нет» и диагностика.
+ *
+ * Оформление — палитра Steam (#1b2838 / #16202d / #2a475e, акцент #66c0f4),
+ * чтобы блок не выглядел чужеродной серой вставкой в настройках Millennium.
  */
 
-const label: React.CSSProperties = { fontWeight: 600, marginTop: 14, marginBottom: 6 };
+const label: React.CSSProperties = { fontWeight: 600, marginTop: 14, marginBottom: 6, color: steamTheme.text };
 const row: React.CSSProperties = { display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' };
-const button: React.CSSProperties = {
-	padding: '6px 12px',
-	borderRadius: 4,
-	border: 'none',
-	cursor: 'pointer',
-	fontWeight: 600,
-	background: 'rgba(255,255,255,.14)',
-	color: 'inherit',
-};
+const button: React.CSSProperties = steamButton(false);
 const input: React.CSSProperties = {
 	padding: '6px 8px',
 	borderRadius: 4,
-	border: '1px solid rgba(255,255,255,.25)',
-	background: 'rgba(0,0,0,.35)',
-	color: 'inherit',
+	border: `1px solid ${steamTheme.border}`,
+	background: steamTheme.panel,
+	color: steamTheme.text,
 	font: 'inherit',
 };
-const muted: React.CSSProperties = { opacity: 0.72, fontSize: 12, lineHeight: 1.5 };
+const muted: React.CSSProperties = { color: steamTheme.muted, fontSize: 12, lineHeight: 1.5 };
 
 type ConsentState = { consent: string; asked: boolean; shownFor: string };
 
@@ -125,7 +121,18 @@ export const SettingsPanel = () => {
 					: 'ещё не спросили — вопрос появится в библиотеке при встрече с игрой, которой нет в базе';
 
 	return (
-		<div style={{ fontSize: 13, lineHeight: 1.55, maxWidth: 760 }}>
+		<div
+			style={{
+				fontSize: 13,
+				lineHeight: 1.55,
+				maxWidth: 760,
+				padding: '12px 14px',
+				borderRadius: 4,
+				background: steamTheme.panelAlt,
+				border: `1px solid ${steamTheme.border}`,
+				color: steamTheme.text,
+			}}
+		>
 			<div style={muted}>
 				Основной интерфейс плагина — в библиотеке: кнопка Version Rollback в правом нижнем углу и блок в
 				свойствах игры («Версии и бета-версии»). Здесь управляется только сбор метаданных и Issue.
@@ -183,7 +190,7 @@ export const SettingsPanel = () => {
 				</button>
 			</div>
 
-			{message && <div style={{ marginTop: 10, color: '#ffd166' }}>{message}</div>}
+			{message && <div style={{ marginTop: 10, color: steamTheme.accent }}>{message}</div>}
 		</div>
 	);
 };

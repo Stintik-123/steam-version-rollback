@@ -1,6 +1,7 @@
 import { useState } from 'react';
 
 import { api, openExternal } from '../lib/rpc';
+import { steamButton, steamTheme } from '../lib/steamTheme';
 
 /**
  * Карточка единственного вопроса: «разрешаете собирать метаданные о версиях
@@ -66,13 +67,14 @@ export const ConsentCard = ({
 	};
 
 	const box: React.CSSProperties = {
-		width: '360px',
+		width: '100%',
+		boxSizing: 'border-box',
 		padding: '12px 14px',
-		borderRadius: '6px',
-		background: 'linear-gradient(180deg, rgba(23,26,33,.98), rgba(12,14,18,.98))',
-		border: '1px solid rgba(255,209,102,.45)',
-		boxShadow: '0 10px 34px rgba(0,0,0,.55)',
-		color: '#e6e6e6',
+		borderRadius: '4px',
+		background: steamTheme.panel,
+		border: `1px solid ${steamTheme.border}`,
+		boxShadow: '0 6px 20px rgba(0,0,0,.45)',
+		color: steamTheme.text,
 		fontSize: '13px',
 		lineHeight: 1.45,
 	};
@@ -81,32 +83,32 @@ export const ConsentCard = ({
 		flex: '1 1 0',
 		padding: '7px 10px',
 		borderRadius: '4px',
-		border: 'none',
 		cursor: busy ? 'default' : 'pointer',
 		fontWeight: '600',
+		font: 'inherit',
 	};
 
 	return (
 		<div style={box} role="dialog" aria-label="Сбор метаданных о версиях">
-			<div style={{ fontWeight: 700, marginBottom: 6, color: '#ffd166' }}>Version Rollback: вопрос один раз</div>
+			<div style={{ fontWeight: 700, marginBottom: 6, color: steamTheme.accent }}>Version Rollback: вопрос один раз</div>
 			<div style={{ marginBottom: 8 }}>
 				Игры <b>{appName ? `${appName} ` : ''}(AppID {appid})</b> ещё нет в общей базе версий плагина. Разрешаете
 				собрать по ней метаданные — только AppID, buildid и пары depotid → manifest GID (без ключей депо, без
 				аккаунта, без файлов игры) — и отправить их в Issue проекта, чтобы версия появилась в базе?
 			</div>
-			<div style={{ marginBottom: 10, opacity: 0.85, fontSize: 12 }}>
+			<div style={{ marginBottom: 10, color: steamTheme.muted, fontSize: 12 }}>
 				«Да» — сбор и Issue по этой игре (без токена GitHub откроется готовая форма: отправляете вы сами).
 				«Нет» — плагин не читает локальные кэши Steam и ничего не отправляет. Переспрашивать не будем.
 			</div>
-			{status && <div style={{ marginBottom: 6, color: '#8fd18f' }}>{status}</div>}
-			{error && <div style={{ marginBottom: 6, color: '#ff6b6b' }}>{error}</div>}
+			{status && <div style={{ marginBottom: 6, color: steamTheme.ok }}>{status}</div>}
+			{error && <div style={{ marginBottom: 6, color: steamTheme.err }}>{error}</div>}
 			<div style={{ display: 'flex', gap: 8 }}>
-				<button type="button" style={{ ...button, background: '#1a9fff', color: '#fff' }} disabled={busy} onClick={() => answer(true)}>
+				<button type="button" style={{ ...button, ...steamButton(true) }} disabled={busy} onClick={() => answer(true)}>
 					Да, собирать
 				</button>
 				<button
 					type="button"
-					style={{ ...button, background: 'rgba(255,255,255,.12)', color: '#e6e6e6' }}
+					style={{ ...button, ...steamButton(false) }}
 					disabled={busy}
 					onClick={() => answer(false)}
 				>

@@ -517,8 +517,23 @@ test("collector: отчёт по одной игре не тянет чужие"
 	check(type(all) == "string" and all:find("Cyberpunk", 1, true) ~= nil, "вторая игра в полном отчёте")
 end)
 
+
+--- ============================ steam-appdb ============================
+test("appdb: поиск AppID по названию в каталоге", function()
+	local appdb = require("appdb")
+	local raw = '{"applist":{"apps":[{"appid":10,"name":"Counter-Strike"},{"appid":20,"name":"Team Fortress Classic"},{"appid":240,"name":"Team Fortress 2"}]}}'
+	local res = appdb.scan(raw, "team fortress", 10)
+	eq(#res, 2, "нашлись обе игры Team Fortress")
+	eq(res[1].appid, "20", "AppID Team Fortress Classic")
+	eq(res[1].name, "Team Fortress Classic", "имя первой игры")
+	eq(res[2].appid, "240", "AppID Team Fortress 2")
+	eq(#appdb.scan(raw, "нет-такой-игры", 10), 0, "без совпадений — пусто")
+	eq(#appdb.scan(raw, "", 10), 0, "пустой запрос — пусто")
+	eq(#appdb.scan(raw, "counter", 1), 1, "лимит результатов режет список")
+end)
 -- ============================ итог ============================
 if #failed > 0 then
 	error("ПРОВАЛЕНО " .. #failed .. ":\n  " .. table.concat(failed, "\n  "), 0)
 end
 return "ALL PASSED: " .. passed .. " проверок"
+

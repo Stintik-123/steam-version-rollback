@@ -12,6 +12,7 @@ local steam = require("steam")
 local appinfo = require("appinfo")
 local steamraw = require("steamraw")
 local steamcounts = require("steamcounts")
+local appdb = require("appdb")
 local localcache = require("localcache")
 local versiondb = require("versiondb")
 local collector = require("collector")
@@ -390,10 +391,10 @@ function submit_app_issue(appid)
 		versiondb.save_user(db)
 
 		local body, stats = collector.report(id)
-		if stats.apps == 0 then
-			return { ok = false, error = "по игре пока нет метаданных: локальные кэши Steam пусты, повторите после установки/запуска игры" }
-		end
 		local title = string.format("Версия %s: %s сборок, %s манифестов (локальный сбор)", id, tostring(stats.builds), tostring(stats.manifests))
+		-- Ссылку на Issue отдаём ВСЕГДА: даже если локально ничего не нашлось,
+		-- пользователь всё равно должен получить предзаполненную форму.
+		local url, truncated = collector.issue_url(body, title)
 		local token = tostring(cfg_get("github_token", ""))
 		if token ~= "" then
 			local payload = util.encode_json({ title = title, body = body, labels = { "version-data" } })
@@ -426,8 +427,7 @@ function submit_app_issue(appid)
 			util.warn("GitHub API не принял Issue: " .. tostring(res and res.status))
 			-- падаем в ссылочный путь: пользователь отправит сам
 		end
-		local url, truncated = collector.issue_url(body, title)
-		return { ok = true, url = url, truncated = truncated, stats = stats, auto = false, errors = row.errors }
+		return { ok = true, url = url, truncated = truncated, stats = stats, auto = false, errors = row.errors, empty = stats.apps == 0 }
 	end)
 end
 
@@ -635,6 +635,26 @@ end
 function get_local_cache(appid)
 	return json_call(function()
 		return localcache.report(appid)
+	end)
+end
+
+--- Каталог AppID из открытой базы steam-appdb: поиск игры по названию.
+---@ffi
+---@param query string
+---@param force boolean
+---@return string JSON { ok, source, results = [{ appid, name }] }
+function appdb_search(query, force)
+	return json_call(function()
+		local results, err = appdb.search(query, force == true)
+		if err then
+			return { ok = false, error = err }
+		end
+		return {
+			ok = true,
+			source = appdb.URL,
+			query = tostring(query or ""),
+			results = results,
+		}
 	end)
 end
 
@@ -1071,3 +1091,4 @@ function get_log()
 end
 
 util.log("RPC-функции зарегистрированы")
+

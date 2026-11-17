@@ -69,6 +69,7 @@ const ARG_NAMES: Record<string, string[]> = {
 	save_local_db: ['appid'],
 	export_local: ['appid'],
 	get_steamcounts: ['appid', 'force'],
+	appdb_search: ['query', 'force'],
 	add_steamcounts_db: ['appid'],
 	probe_sources: [],
 	collect_all: ['force'],
@@ -161,6 +162,8 @@ export const api = {
 	saveLocalDb: (appid: string) => call<any>('save_local_db', String(appid)),
 	exportLocal: (appid: string) => call<any>('export_local', String(appid)),
 	getSteamCounts: (appid: string, force = false) => call<any>('get_steamcounts', String(appid), force),
+	/** Поиск AppID по названию игры в открытой базе steam-appdb. */
+	appdbSearch: (query: string, force = false) => call<any>('appdb_search', String(query), force),
 	addSteamCountsDb: (appid: string) => call<any>('add_steamcounts_db', String(appid)),
 	probeSources: () => call<any>('probe_sources'),
 	collectAll: (force = false) => call<any>('collect_all', force),

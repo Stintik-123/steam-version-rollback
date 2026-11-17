@@ -11,6 +11,16 @@ if not ok_json then
 	cjson = require("cjson")
 end
 
+-- ВАЖНО (падежи хоста): в Millennium 3.6.3 модуль "json" — это обычный
+-- lua-cjson БЕЗ подтаблицы .safe. Обращение к cjson.safe.encode (== nil)
+-- внутри FFI-функции — это необработанная ошибка Lua, на которой нативный
+-- диспетчер Millennium роняет процесс luavm64 с 0xC0000409
+-- (Stack Buffer Overrun) — Steam не запускается, плагин «ломает запуск».
+-- Поэтому сами выбираем: .safe, если есть, иначе обычные encode/decode,
+-- всегда под pcall — ошибка JSON больше не убивает хост.
+local encode_fn = (cjson.safe and cjson.safe.encode) or cjson.encode
+local decode_fn = (cjson.safe and cjson.safe.decode) or cjson.decode
+
 local util = {}
 
 util.MAX_LOG = 250
@@ -97,17 +107,20 @@ function util.decode_json(text)
 	if type(text) ~= "string" or text == "" then
 		return nil, "пустой JSON"
 	end
-	local decoded, err = cjson.safe.decode(text)
+	local ok, decoded = pcall(decode_fn, text)
+	if not ok then
+		return nil, tostring(decoded)
+	end
 	if decoded == nil then
-		return nil, tostring(err)
+		return nil, "не удалось разобрать JSON"
 	end
 	return decoded
 end
 
 function util.encode_json(tbl)
-	local encoded, err = cjson.safe.encode(tbl)
-	if encoded == nil then
-		util.err("не удалось собрать JSON: " .. tostring(err))
+	local ok, encoded = pcall(encode_fn, tbl)
+	if not ok or type(encoded) ~= "string" then
+		util.err("не удалось собрать JSON: " .. tostring(encoded))
 		return "{}"
 	end
 	return encoded
