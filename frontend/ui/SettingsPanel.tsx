@@ -25,7 +25,7 @@ const row: React.CSSProperties = { display: 'flex', gap: 8, alignItems: 'center'
 const button: React.CSSProperties = steamButton(false);
 const input: React.CSSProperties = {
 	padding: '6px 10px',
-	borderRadius: 3
+	borderRadius: 3,
 	border: `1px solid ${steamTheme.border}`,
 	background: steamTheme.panel,
 	color: steamTheme.text,
@@ -70,7 +70,6 @@ export const SettingsPanel = () => {
 			} else {
 				await api.setConsent(value);
 			}
-			// сброс кэша в inject (если экспортирован)
 			try {
 				(window as any).dispatchEvent?.(new Event('vrb-consent-changed'));
 			} catch {
@@ -165,7 +164,6 @@ export const SettingsPanel = () => {
 				Основной интерфейс — в свойствах игры («Версии и бета-версии»). Здесь только согласие на сбор
 				метаданных и опциональный токен GitHub.
 			</div>
-
 
 			<div style={label}>Сбор метаданных о версиях</div>
 			<div>Сейчас: <b>{consentText}</b></div>
