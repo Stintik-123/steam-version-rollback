@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { getReactInstance } from 'millennium';
 
@@ -6,23 +6,8 @@ import { api } from '../lib/rpc';
 import { currentRoute, onRoute, startRouteTracking } from '../lib/route';
 import { ConsentCard } from './ConsentBanner';
 
-/**
- * Единственный механизм показа карточки согласия.
- *
- * Раньше карточку пытались вставить и inject.tsx, и GlobalCard — конфликт по
- * одному id, хрупкий поиск якорей, AppID часто не находился. Теперь:
- *  - только этот компонент;
- *  - AppID из URL / маршрута Steam, React Fiber — запасной путь;
- *  - якоря ищем по подстроке (не только точное совпадение);
- *  - MutationObserver держит попытки, пока страница не дорисуется;
- *  - диагностика в api.debugNote на каждом шаге.
- */
-
 const CONSENT_ID = 'version-rollback-consent-card';
-
-/** Подстроки заголовка «Активность» (регистр не важен). */
 const ACTIVITY_SUB = ['активность', 'activity', 'aktivität', 'activite', 'activité'];
-/** Подстроки блока обновления / featured. */
 const UPDATE_SUB = [
 	'небольшое обновление',
 	'minor update',
@@ -40,16 +25,15 @@ const log = (msg: string) => {
 
 const findTextBySubstrings = (subs: string[]): HTMLElement | null => {
 	if (!document.body) return null;
-	const lowerSubs = subs.map((s) => s.toLowerCase());
+	const needles = subs.map((s) => s.toLowerCase());
 	const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
 	let node: Node | null = walker.nextNode();
 	while (node) {
 		const text = (node.nodeValue ?? '').trim();
-		if (text && text.length < 100) {
-			const low = text.toLowerCase();
-			if (lowerSubs.some((s) => low.includes(s))) {
-				const parent = node.parentElement;
-				if (parent) return parent;
+		if (text.length > 0 && text.length < 100) {
+			const lower = text.toLowerCase();
+			if (needles.some((needle) => lower.includes(needle)) && node.parentElement) {
+				return node.parentElement;
 			}
 		}
 		node = walker.nextNode();
@@ -57,12 +41,9 @@ const findTextBySubstrings = (subs: string[]): HTMLElement | null => {
 	return null;
 };
 
-/** AppID: URL → route → React props контейнера игры. */
 const findAppId = (): string | undefined => {
-	const href = String(location.href ?? '') + ' ' + String(location.hash ?? '');
-	const fromUrl =
-		href.match(/(?:#|\/)(?:app|details|library\/app)\/(\d{3,})/i) ??
-		href.match(/\/app\/(\d{3,})/);
+	const href = `${String(location.href ?? '')} ${String(location.hash ?? '')}`;
+	const fromUrl = href.match(/(?:#|\/)(?:app|details|library\/app)\/(\d{3,})(?:\/|\?|$)/i);
 	if (fromUrl) return fromUrl[1];
 
 	const route = currentRoute();
@@ -87,34 +68,23 @@ const findAppId = (): string | undefined => {
 			fiber = fiber.return;
 		}
 	} catch {
-		/* без React-дерева */
+		// React-дерево Steam может быть недоступно в текущем контексте.
 	}
 	return undefined;
 };
 
-/**
- * Вставить host перед «Активность» или после блока обновления.
- * Возвращает true, если реально переместили в поток страницы.
- */
 const placeHost = (host: HTMLElement): boolean => {
 	if (!document.body) return false;
-	if (host.isConnected && host.parentElement && host.parentElement !== document.body) {
-		const parentText = (host.parentElement.innerText ?? '').slice(0, 200).toLowerCase();
-		if (ACTIVITY_SUB.some((s) => parentText.includes(s)) || UPDATE_SUB.some((s) => parentText.includes(s))) {
-			return true;
-		}
-	}
-
 	const activity = findTextBySubstrings(ACTIVITY_SUB);
 	if (activity?.parentElement) {
 		activity.parentElement.insertBefore(host, activity);
-		log('placed before activity');
+		log('карточка размещена перед блоком активности');
 		return true;
 	}
 	const update = findTextBySubstrings(UPDATE_SUB);
 	if (update?.parentElement) {
 		update.parentElement.insertAdjacentElement('afterend', host);
-		log('placed after update');
+		log('карточка размещена после блока обновлений');
 		return true;
 	}
 	return false;
@@ -122,64 +92,74 @@ const placeHost = (host: HTMLElement): boolean => {
 
 export const GlobalCard = () => {
 	const hostRef = useRef<HTMLDivElement | null>(null);
+	const currentAppRef = useRef<string | null>(null);
+	const processedApps = useRef(new Set<string>());
+	const inFlightApps = useRef(new Set<string>());
+	const generation = useRef(0);
 	const [appid, setAppid] = useState<string | null>(null);
 	const [placed, setPlaced] = useState(false);
-	const decidedRef = useRef(false);
 
-	useEffect(() => {
-		startRouteTracking();
-		const off = onRoute((route) => {
-			if (route.appid && !decidedRef.current) {
-				void tryDecide(route.appid);
-			}
-		});
-		return () => {
-			off();
-		};
-	}, []);
-
-	const tryDecide = async (hint?: string): Promise<void> => {
-		if (decidedRef.current) return;
+	const checkApp = useCallback(async (id: string, requestGeneration: number): Promise<void> => {
+		if (processedApps.current.has(id) || inFlightApps.current.has(id)) return;
+		inFlightApps.current.add(id);
 		try {
-			const state = await api.getConsent();
-			if (state?.asked) {
-				log('skip: already asked consent=' + String(state?.consent ?? ''));
-				decidedRef.current = true;
-				return;
-			}
-			const id = hint || findAppId();
-			if (!id) {
-				log('no appid yet href=' + String(location.href).slice(0, 80));
+			const consent = await api.getConsent();
+			if (requestGeneration !== generation.current || currentAppRef.current !== id) return;
+			if (consent?.asked) {
+				processedApps.current.add(id);
+				log('вопрос уже был задан; карточка не требуется');
 				return;
 			}
 			const known = await api.appKnown(id);
+			if (requestGeneration !== generation.current || currentAppRef.current !== id) return;
+			processedApps.current.add(id);
 			if (known?.known) {
-				log('skip: app known appid=' + id);
-				decidedRef.current = true;
+				log(`игра ${id} уже есть в базе; карточка не требуется`);
 				return;
 			}
-			log('show card for appid=' + id);
-			decidedRef.current = true;
+			log(`показываю карточку согласия для AppID ${id}`);
+			setPlaced(false);
 			setAppid(id);
-		} catch (e) {
-			log('decide error: ' + String(e));
+		} catch (error) {
+			log(`проверка для AppID ${id} не удалась: ${String(error)}`);
+		} finally {
+			inFlightApps.current.delete(id);
 		}
-	};
+	}, []);
+
+	const selectApp = useCallback((id?: string) => {
+		const next = id && /^\d{3,}$/.test(id) ? id : null;
+		if (currentAppRef.current !== next) {
+			currentAppRef.current = next;
+			generation.current += 1;
+			setAppid(null);
+			setPlaced(false);
+		}
+		if (next) void checkApp(next, generation.current);
+	}, [checkApp]);
 
 	useEffect(() => {
-		void tryDecide();
+		startRouteTracking();
+		const off = onRoute((route) => selectApp(route.appid));
+		const onConsentChanged = () => {
+			processedApps.current.clear();
+			selectApp(findAppId());
+		};
+		window.addEventListener('vrb-consent-changed', onConsentChanged);
 
-		const observer = new MutationObserver(() => {
-			if (!decidedRef.current) void tryDecide();
-			if (appid && hostRef.current && !placed) {
-				if (placeHost(hostRef.current)) setPlaced(true);
-			}
-		});
+		const scan = () => selectApp(findAppId());
+		scan();
+		let observer: MutationObserver | undefined;
 		if (document.body) {
+			observer = new MutationObserver(scan);
 			observer.observe(document.body, { childList: true, subtree: true, characterData: true });
 		}
-		return () => observer.disconnect();
-	}, [appid, placed]);
+		return () => {
+			off();
+			observer?.disconnect();
+			window.removeEventListener('vrb-consent-changed', onConsentChanged);
+		};
+	}, [selectApp]);
 
 	useEffect(() => {
 		if (!appid || !hostRef.current || placed) return;
@@ -188,22 +168,22 @@ export const GlobalCard = () => {
 			setPlaced(true);
 			return;
 		}
+		// Если Steam изменил разметку или язык, карточка всё равно остаётся видимой.
 		host.style.cssText =
 			'position:fixed;left:50%;transform:translateX(-50%);bottom:24px;z-index:2147483646;width:min(520px,calc(100vw - 32px));';
-		if (!host.isConnected) document.body.appendChild(host);
-		log('fallback fixed bottom center appid=' + appid);
+		document.body?.appendChild(host);
+		log(`якорь страницы не найден; карточка показана поверх окна (AppID ${appid})`);
 		setPlaced(true);
 	}, [appid, placed]);
 
 	if (!appid) return null;
-
 	return (
 		<div ref={hostRef} id={CONSENT_ID} style={{ margin: '12px 0' }}>
 			<ConsentCard
 				appid={appid}
 				onDone={() => {
+					processedApps.current.add(appid);
 					setAppid(null);
-					decidedRef.current = true;
 				}}
 			/>
 		</div>
