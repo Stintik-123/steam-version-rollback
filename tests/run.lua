@@ -229,6 +229,221 @@ test("appinfo: normalize на пустом ответе", function()
 	check(tostring(err):find("нет данных") ~= nil, "понятная ошибка")
 end)
 
+-- ============================ SteamRaw ============================
+test("steamraw: реконструкция манифестов на момент сборки", function()
+	local steamraw = require("steamraw")
+	local builds = {
+		{ buildid = "1", branch = "public", time_updated = 300 },
+		{ buildid = "2", branch = "public", time_updated = 200 },
+		{ buildid = "3", branch = "public", time_updated = 100 },
+		{ buildid = "9", branch = "2_31_old", time_updated = 250 },
+	}
+	local history = {
+		{ ts = 300, key = "depots.111.manifests.public.gid", old_value = "9", new_value = "10" },
+		{ ts = 200, key = "depots.222.manifests.public.gid", old_value = "19", new_value = "20" },
+		{ ts = 100, key = "depots.111.manifests.public.gid", old_value = "8", new_value = "9" },
+		-- другая ветка не должна влиять
+		{ ts = 250, key = "depots.111.manifests.2_31_old.gid", old_value = "777", new_value = "888" },
+	}
+	local current = { ["111"] = "10", ["222"] = "20" }
+	local list = steamraw.reconstruct(builds, history, current, "public")
+	eq(#list, 3, "только сборки public")
+	eq(list[1].buildid, "1", "свежая сборка первой")
+	eq(list[1].depots["111"], "10", "манифест 111 на сборке 300")
+	eq(list[1].depots["222"], "20", "манифест 222 на сборке 300")
+	eq(list[2].depots["111"], "9", "111 откатился до 9 на сборке 200")
+	eq(list[3].depots["222"], "19", "222 откатился до 19 на сборке 100")
+	eq(list[3].depots["111"], "9", "111 остался 9 на сборке 100")
+	check(list[1].complete and list[3].complete, "все сборки в пределах истории")
+end)
+
+test("steamraw: сборка старше истории — неполная", function()
+	local steamraw = require("steamraw")
+	local builds = { { buildid = "1", branch = "public", time_updated = 50 } }
+	local history = { { ts = 300, key = "depots.111.manifests.public.gid", old_value = "9", new_value = "10" } }
+	local list = steamraw.reconstruct(builds, history, { ["111"] = "10" }, "public")
+	eq(#list, 1, "одна сборка")
+	eq(list[1].complete, false, "история не покрывает такую давность")
+end)
+
+-- ============================ localcache ============================
+test("localcache: разбор content_log.txt", function()
+	local localcache = require("localcache")
+	local text = table.concat({
+		"AppID 1091500 DepotID 1091501 ManifestID 2461377369266892508 3 0",
+		"AppID 1091500 DepotID 1091503 ManifestID 2461377369266892509",
+		"AppID 440 DepotID 441 ManifestID 111",
+		"строка без манифеста",
+	}, "\n")
+	local rows = localcache.parse_content_log(text)
+	eq(#rows, 3, "три записи с манифестами")
+	eq(rows[1].appid, "1091500", "appid")
+	eq(rows[1].depotid, "1091501", "depotid")
+	eq(rows[1].gid, "2461377369266892508", "64-битный GID остался строкой")
+	eq(rows[3].appid, "440", "appid второй игры")
+	eq(rows[2].depotid, "1091503", "depotid второго депо")
+end)
+
+test("localcache: имя файла depotcache", function()
+	local localcache = require("localcache")
+	local depotid, gid = localcache.parse_depotcache_name("1091501_2461377369266892508.manifest")
+	eq(depotid, "1091501", "depotid из двух чисел")
+	eq(gid, "2461377369266892508", "gid из двух чисел")
+	depotid, gid = localcache.parse_depotcache_name("1091500_1091501_2461377369266892508.manifest")
+	eq(depotid, "1091501", "depotid из трёх чисел")
+	eq(gid, "2461377369266892508", "gid из трёх чисел")
+	depotid, gid = localcache.parse_depotcache_name("2461377369266892508_manifest")
+	eq(depotid, nil, "без depotid разбор не даёт")
+end)
+
+test("localcache: импорт списка депо -> GID", function()
+	local localcache = require("localcache")
+	local text = table.concat({
+		"1091501 2461377369266892508",
+		"1091503, 2461377369266892509",
+		"DepotID 1091505 ManifestID 2461377369266892510",
+		"# комментарий",
+		"совсем мусор",
+	}, "\n")
+	local rows, problems = localcache.parse_manifest_text(text)
+	eq(#rows, 3, "три разобранные строки")
+	eq(rows[1].depotid, "1091501", "depotid пробелом")
+	eq(rows[1].gid, "2461377369266892508", "gid пробелом")
+	eq(rows[2].gid, "2461377369266892509", "gid через запятую")
+	eq(rows[3].depotid, "1091505", "depotid из подписей")
+	eq(rows[3].gid, "2461377369266892510", "gid из подписей")
+	eq(#problems, 1, "одна неразобранная строка")
+	eq(problems[1], "совсем мусор", "что именно не разобралось")
+end)
+
+test("localcache: группировка манифестов по депо", function()
+	local localcache = require("localcache")
+	local grouped = localcache.group({
+		{ depotid = "1", gid = "10" },
+		{ depotid = "1", gid = "11" },
+		{ depotid = "1", gid = "10" },
+		{ depotid = "2", gid = "20" },
+	})
+	eq(#grouped["1"], 2, "два уникальных манифеста у депо 1")
+	eq(grouped["1"][1], "10", "порядок сохранён")
+	eq(#grouped["2"], 1, "у депо 2 один манифест")
+end)
+
+-- ============================ SteamCounts ============================
+test("steamcounts: таблица депо с текущими GID", function()
+	local steamcounts = require("steamcounts")
+	local depots = steamcounts.parse_depots(FIXTURE_STEAMCOUNTS)
+	eq(depots["1091501"].gid, "3524634124112875626", "64-битный GID депо 1091501")
+	eq(depots["1091501"].size, 66818683782, "размер депо в байтах")
+	eq(depots["1091501"].os, "windows", "ОС депо")
+	eq(depots["1091502"].gid, "4172273210291337333", "GID второго депо")
+	eq(depots["228988"], nil, "депо без манифеста не попало")
+end)
+
+test("steamcounts: история обновлений с датами и changelist", function()
+	local steamcounts = require("steamcounts")
+	local updates = steamcounts.parse_updates(FIXTURE_STEAMCOUNTS)
+	eq(#updates, 3, "три обновления")
+	eq(updates[1].ts, 1792762494, "время наблюдения")
+	eq(updates[1].branch, "public", "ветка")
+	eq(updates[1].buildid, "26161058", "новый buildid")
+	eq(updates[1].prev_buildid, "26133166", "предыдущий buildid")
+	eq(updates[1].depots_changed, 2, "сколько депо изменилось")
+	eq(updates[1].changelist, "40170744", "changelist")
+	eq(updates[2].branch, "2_31_old", "legacy-ветка сохранена")
+	eq(updates[3].prev_buildid, nil, "у первой записи ветки нет предыдущей сборки")
+end)
+
+-- ============================ versiondb ============================
+test("versiondb: слияние баз не теряет ни сборки, ни манифесты", function()
+	local versiondb = require("versiondb")
+	local a = {
+		version = 1,
+		apps = {
+			["1091500"] = {
+				name = "Cyberpunk 2077",
+				builds = { ["20000001"] = { ts = 300, branch = "public", depots = { ["1091501"] = "111" } } },
+				manifests = { ["1091501:111"] = { depotid = "1091501", gid = "111", ts = 300 } },
+			},
+		},
+	}
+	local b = {
+		version = 1,
+		apps = {
+			["1091500"] = {
+				builds = { ["20000002"] = { ts = 100, branch = "public", depots = { ["1091501"] = "222" } } },
+				manifests = { ["1091501:222"] = { depotid = "1091501", gid = "222", ts = 100 } },
+			},
+			["440"] = { builds = { ["10"] = { ts = 50, branch = "public", depots = { ["441"] = "9" } } } },
+		},
+	}
+	local merged = versiondb.merge(a, b)
+	eq(merged.apps["1091500"].builds["20000001"].depots["1091501"], "111", "сборка из первой базы")
+	eq(merged.apps["1091500"].builds["20000002"].depots["1091501"], "222", "сборка из второй базы")
+	eq(merged.apps["1091500"].manifests["1091501:222"].gid, "222", "манифест второй базы")
+	eq(merged.apps["440"].builds["10"].depots["441"], "9", "другое приложение")
+	eq(merged.apps["1091500"].name, "Cyberpunk 2077", "имя сохранено")
+end)
+
+test("versiondb: добавление сборки и манифеста", function()
+	local versiondb = require("versiondb")
+	local db = { version = 1, apps = {} }
+	versiondb.add_build(db, "1091500", "20000005", "public", 500, { ["1091501"] = "2461377369266892508" })
+	eq(db.apps["1091500"].builds["20000005"].depots["1091501"], "2461377369266892508", "64-битный GID в сборке")
+	eq(db.apps["1091500"].manifests["1091501:2461377369266892508"].gid, "2461377369266892508", "манифест попал в пул")
+	check(versiondb.has_manifest(db, "1091500", "1091501", "2461377369266892508"), "манифест найден в базе")
+	check(not versiondb.has_manifest(db, "1091500", "1091501", "999"), "чужой манифест не найден")
+	local list = versiondb.builds(db, "1091500")
+	eq(#list, 1, "одна сборка")
+	eq(list[1].source, "db", "источник — база")
+end)
+
+test("versiondb: сборка без манифестов не попадает в базу как полезная", function()
+	local versiondb = require("versiondb")
+	local db = { version = 1, apps = {} }
+	versiondb.add_build(db, "440", "10", "public", 50, {})
+	eq(next(versiondb.builds(db, "440")), nil, "пустых сборок нет")
+end)
+
+test("versiondb: неполная сборка помечается и не «дочиняется» слиянием", function()
+	local versiondb = require("versiondb")
+	local db = { version = 1, apps = {} }
+	versiondb.add_build(db, "440", "10", "public", 500, { ["441"] = "111" }, false)
+	local list = versiondb.builds(db, "440")
+	eq(list[1].complete, false, "сборка без полного снимка помечена неполной")
+	local merged = versiondb.merge(db, {
+		apps = { ["440"] = { builds = { ["10"] = { ts = 600, branch = "public", depots = { ["441"] = "222" }, complete = true } } } },
+	})
+	eq(merged.apps["440"].builds["10"].complete, false, "полная копия не делает неполную полной")
+	eq(merged.apps["440"].builds["10"].depots["441"], "111", "манифест из первой базы не перетирается")
+end)
+
+-- ============================ collector / util ============================
+test("util: url_encode", function()
+	eq(util.url_encode("a b"), "a%20b", "пробел")
+	eq(util.url_encode("A-Z_0.9~"), "A-Z_0.9~", "безопасные символы не трогаем")
+	eq(util.url_encode("привет"), "%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82", "кириллица по байтам")
+	eq(util.url_encode("a&b=c"), "a%26b%3Dc", "разделители экранируются")
+end)
+
+test("util: date_utc не падает без os.date", function()
+	local value = util.date_utc(1760000000)
+	check(type(value) == "string" and #value > 0, "дата — строка")
+	eq(util.date_utc(0), "?", "нулевое время")
+end)
+
+test("collector: ссылка на Issue с телом", function()
+	local collector = require("collector")
+	local url, truncated = collector.issue_url("строка 1\nстрока 2", "Заголовок")
+	check(url:find("github.com/Stintik-123/steam-version-rollback/issues/new", 1, true) ~= nil, "репозиторий в ссылке")
+	check(url:find("title=", 1, true) ~= nil, "заголовок передан")
+	check(url:find("body=", 1, true) ~= nil, "тело передано")
+	eq(truncated, false, "короткое тело не режется")
+	local long, cut = collector.issue_url(string.rep("x", 9000), "T")
+	eq(cut, true, "длинное тело помечается как урезанное")
+	check(#long < 9000, "ссылка укорочена")
+end)
+
 -- ============================ итог ============================
 if #failed > 0 then
 	error("ПРОВАЛЕНО " .. #failed .. ":\n  " .. table.concat(failed, "\n  "), 0)

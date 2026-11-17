@@ -6,9 +6,15 @@
 
 local millennium = require("millennium")
 local fs = require("fs")
+local http = require("http")
 local util = require("util")
 local steam = require("steam")
 local appinfo = require("appinfo")
+local steamraw = require("steamraw")
+local steamcounts = require("steamcounts")
+local localcache = require("localcache")
+local versiondb = require("versiondb")
+local collector = require("collector")
 local plan = require("plan")
 local jobs = require("jobs")
 local swap = require("swap")
@@ -31,6 +37,28 @@ local function cfg_get(key, default)
 		return value
 	end
 	return default
+end
+
+--- Согласие пользователя на сбор данных. Три состояния:
+--- "yes" — собираем, "no" — не собираем, "" (пусто) — ещё не спрашивали.
+local function consent_state()
+	local value = cfg_get("collect_consent", "")
+	if value == true then
+		return "yes"
+	end
+	if value == false then
+		return "no"
+	end
+	value = tostring(value)
+	if value == "yes" or value == "no" then
+		return value
+	end
+	return ""
+end
+
+--- Локальный сбор метаданных — только по явному согласию пользователя.
+local function local_collect_allowed()
+	return consent_state() == "yes"
 end
 
 --- Подписи веток: сначала пользовательский файл в data_dir, потом ресурс плагина.
@@ -137,6 +165,10 @@ function get_state()
 				include_dlc = cfg_get("include_dlc", false),
 				languages = cfg_get("languages", "english,russian"),
 				delay_updates = cfg_get("delay_updates", false),
+				local_collect = local_collect_allowed(),
+				collect_consent = consent_state(),
+				consent_shown_for = cfg_get("consent_shown_for", ""),
+				github_token_set = (cfg_get("github_token", "") ~= ""),
 				last_appid = cfg_get("last_appid", ""),
 			},
 		}
@@ -185,9 +217,510 @@ function get_app(appid, force)
 end
 
 ---@ffi
+---@param text string
+---@return string JSON
+function debug_note(text)
+	return json_call(function()
+		local dir = util.data_dir()
+		local path = require("fs").join(dir, "frontend-debug.txt")
+		local ok = require("utils").append_file(path, tostring(util.now()) .. " " .. tostring(text) .. "\n")
+		return { ok = ok ~= nil, path = path }
+	end)
+end
+
+---@ffi
 ---@param appid string
----@param selection_json string
----@param options_json string
+---@param branch string
+---@param force boolean
+---@return string JSON { versions = [{ buildid, ts, branch, depots, complete, source }] }
+function get_versions(appid, branch, force)
+	return json_call(function()
+		local id = util.norm_id(appid)
+		if not id then
+			return { ok = false, error = "некорректный AppID" }
+		end
+		local info, err = appinfo.get(id, false)
+		if not info then
+			return { ok = false, error = err }
+		end
+		local b = (branch ~= nil and branch ~= "") and tostring(branch) or "public"
+		-- текущие манифесты ветки — точка отсчёта для обратной прокрутки истории
+		local current = {}
+		for depotid, depot in pairs(info.depots) do
+			local manifest = depot.manifests and depot.manifests[b]
+			if manifest and manifest.gid then
+				current[depotid] = manifest.gid
+			end
+		end
+
+		-- Сборки из общей+локальной базы (то, что накопили раньше).
+		local db = versiondb.load()
+		local merged, order = {}, {}
+		local function put(entry)
+			local existing = merged[entry.buildid]
+			if existing then
+				for depotid, gid in pairs(entry.depots or {}) do
+					if not existing.depots[depotid] then
+						existing.depots[depotid] = gid
+					end
+				end
+				existing.ts = math.max(existing.ts or 0, entry.ts or 0)
+				existing.source = tostring(existing.source) .. "+" .. tostring(entry.source)
+				existing.complete = existing.complete and entry.complete
+			else
+				merged[entry.buildid] = entry
+				order[#order + 1] = entry.buildid
+			end
+		end
+
+		for _, entry in ipairs(versiondb.builds(db, id)) do
+			put(entry)
+		end
+
+		local versions, verr = steamraw.versions(id, b, current, force == true)
+		if versions then
+			for _, entry in ipairs(versions) do
+				entry.source = "steamraw"
+				put(entry)
+			end
+		else
+			versions = {}
+		end
+
+		local out = {}
+		for _, buildid in ipairs(order) do
+			out[#out + 1] = merged[buildid]
+		end
+		table.sort(out, function(a, b2)
+			if (a.ts or 0) ~= (b2.ts or 0) then
+				return (a.ts or 0) > (b2.ts or 0)
+			end
+			return tostring(a.buildid) > tostring(b2.buildid)
+		end)
+
+		return {
+			ok = true,
+			appid = id,
+			app_name = info.name,
+			branch = b,
+			versions = out,
+			db = versiondb.summary(db, id),
+			warning = (not versions) and verr or nil,
+		}
+	end)
+end
+
+---@ffi
+---@param appid string
+---@return string JSON сводка по базе версий
+function get_db_summary(appid)
+	return json_call(function()
+		local db = versiondb.load()
+		return versiondb.summary(db, util.norm_id(appid))
+	end)
+end
+
+--- Собрать локальные находки: что Steam уже видел на этой машине и чего нет в базе.
+---@ffi
+---@param appid string
+---@return string JSON { known = [], missing = [], build = {...} }
+function collect_local(appid)
+	return json_call(function()
+		local id = util.norm_id(appid)
+		if not id then
+			return { ok = false, error = "некорректный AppID" }
+		end
+		if not local_collect_allowed() then
+			return { ok = false, error = "локальный сбор не включён — разрешите его в блоке «Локальный сбор данных»" }
+		end
+		local db = versiondb.load()
+		local entries = localcache.scan(id)
+		local known, missing = {}, {}
+		local seen = {}
+		for _, entry in ipairs(entries) do
+			local key = entry.depotid .. ":" .. entry.gid
+			if not seen[key] then
+				seen[key] = true
+				local row = { depotid = entry.depotid, gid = entry.gid, source = entry.source }
+				if versiondb.has_manifest(db, id, entry.depotid, entry.gid) then
+					known[#known + 1] = row
+				else
+					missing[#missing + 1] = row
+				end
+			end
+		end
+
+		-- Установленная сейчас версия — тоже находка: у неё есть buildid.
+		local acf = steam.read_acf(id)
+		local build = nil
+		if acf and acf.buildid and next(acf.installed_depots or {}) ~= nil then
+			local depots = {}
+			for depotid, gid in pairs(acf.installed_depots) do
+				depots[depotid] = gid
+			end
+			build = {
+				buildid = tostring(acf.buildid),
+				branch = acf.beta_key or "public",
+				ts = acf.last_updated or 0,
+				depots = depots,
+				in_db = false,
+			}
+			for _, entry in ipairs(versiondb.builds(db, id)) do
+				if entry.buildid == build.buildid then
+					build.in_db = true
+					break
+				end
+			end
+		end
+
+		return {
+			ok = true,
+			appid = id,
+			known = known,
+			missing = missing,
+			build = build,
+			total = #known + #missing,
+		}
+	end)
+end
+
+--- Сохранить локальные находки в локальную копию базы.
+---@ffi
+---@param appid string
+---@return string JSON
+function save_local_db(appid)
+	return json_call(function()
+		local id = util.norm_id(appid)
+		if not id then
+			return { ok = false, error = "некорректный AppID" }
+		end
+		if not local_collect_allowed() then
+			return { ok = false, error = "локальный сбор не включён" }
+		end
+		local db = versiondb.user() or { version = versiondb.VERSION, updated = 0, apps = {} }
+		local entries = localcache.scan(id)
+		local added = 0
+		for _, entry in ipairs(entries) do
+			if versiondb.add_manifest(db, id, entry.depotid, entry.gid, 0) then
+				added = added + 1
+			end
+		end
+		local acf = steam.read_acf(id)
+		if acf and acf.buildid then
+			local depots = {}
+			for depotid, gid in pairs(acf.installed_depots or {}) do
+				depots[depotid] = gid
+			end
+			if versiondb.add_build(db, id, tostring(acf.buildid), acf.beta_key, acf.last_updated, depots) then
+				added = added + 1
+			end
+		end
+		local ok = versiondb.save_user(db)
+		return { ok = ok == true, appid = id, added = added, path = versiondb.user_path() }
+	end)
+end
+
+--- Добавить текущие манифесты SteamCounts в локальный пул базы.
+---@ffi
+---@param appid string
+---@return string JSON
+function add_steamcounts_db(appid)
+	return json_call(function()
+		local id = util.norm_id(appid)
+		if not id then
+			return { ok = false, error = "некорректный AppID" }
+		end
+		if not local_collect_allowed() then
+			return { ok = false, error = "локальный сбор не включён" }
+		end
+		local data, err = steamcounts.collect(id, false)
+		if not data then
+			return { ok = false, error = err }
+		end
+		local db = versiondb.user() or { version = versiondb.VERSION, updated = 0, apps = {} }
+		local added = 0
+		for _, row in pairs(data.depots or {}) do
+			if versiondb.add_manifest(db, id, row.depotid, row.gid, 0) then
+				added = added + 1
+			end
+		end
+		local ok = versiondb.save_user(db)
+		return { ok = ok == true, appid = id, added = added, path = versiondb.user_path() }
+	end)
+end
+
+--- Выгрузить локальные находки в файл (для отправки в репозиторий).
+---@ffi
+---@param appid string
+---@return string JSON { path, count }
+function export_local(appid)
+	return json_call(function()
+		local id = util.norm_id(appid)
+		if not id then
+			return { ok = false, error = "некорректный AppID" }
+		end
+		if not local_collect_allowed() then
+			return { ok = false, error = "локальный сбор не включён" }
+		end
+		local db = versiondb.load()
+		local entries = localcache.scan(id)
+		local missing = {}
+		for _, entry in ipairs(entries) do
+			if not versiondb.has_manifest(db, id, entry.depotid, entry.gid) then
+				missing[#missing + 1] = { depotid = entry.depotid, gid = entry.gid, source = entry.source }
+			end
+		end
+		local report = {
+			appid = id,
+			collected_at = util.now(),
+			source = "local Steam cache (content_log.txt, depotcache, appmanifest)",
+			note = "только метаданные: depotid и manifest GID. Ключей депо здесь нет.",
+			manifests = missing,
+		}
+		local acf = steam.read_acf(id)
+		if acf and acf.buildid then
+			local depots = {}
+			for depotid, gid in pairs(acf.installed_depots or {}) do
+				depots[depotid] = gid
+			end
+			report.build = { buildid = tostring(acf.buildid), branch = acf.beta_key, ts = acf.last_updated, depots = depots }
+		end
+		local path = fs.join(util.data_dir(), "local-versions-" .. id .. ".json")
+		local ok = util.write_json_file(path, report)
+		return { ok = ok == true, path = path, count = #missing }
+	end)
+end
+
+---@ffi
+---@param appid string
+---@param text string
+---@return string JSON { rows = [{depotid, gid}], problems = [] }
+function import_manifests(appid, text)
+	return json_call(function()
+		local rows, problems = localcache.parse_manifest_text(text)
+		return {
+			ok = #problems == 0 or #rows > 0,
+			appid = util.norm_id(appid),
+			rows = rows,
+			problems = problems,
+			error = (#rows == 0 and #problems > 0) and "не разобралось ни одной строки" or nil,
+		}
+	end)
+end
+
+---@ffi
+---@param appid string
+---@return string JSON { depots = [{depotid, gids}], entry_count }
+function get_local_cache(appid)
+	return json_call(function()
+		return localcache.report(appid)
+	end)
+end
+
+--- Второй источник истории: SteamCounts (депо с GID + датированные обновления).
+---@ffi
+---@param appid string
+---@param force boolean
+---@return string JSON { depots = [{depotid, gid, size, os}], updates = [...] }
+function get_steamcounts(appid, force)
+	return json_call(function()
+		local id = util.norm_id(appid)
+		if not id then
+			return { ok = false, error = "некорректный AppID" }
+		end
+		local data, err = steamcounts.collect(id, force == true)
+		if not data then
+			return { ok = false, error = err }
+		end
+		local depots = {}
+		for _, row in pairs(data.depots or {}) do
+			depots[#depots + 1] = row
+		end
+		table.sort(depots, function(a, b)
+			return (tonumber(a.depotid) or 0) < (tonumber(b.depotid) or 0)
+		end)
+		return {
+			ok = true,
+			appid = id,
+			depots = depots,
+			updates = data.updates or {},
+			source = "steamcounts.info",
+		}
+	end)
+end
+
+--- Живая проверка источников из подборки: что отвечает, что требует ключа.
+---@ffi
+---@return string JSON { results = [{name, status, kind, note}] }
+function probe_sources()
+	return json_call(function()
+		local sources = {
+			{ name = "SteamRaw (api)", url = "https://steamraw.com/api/app/1091500", kind = "json" },
+			{ name = "SteamCMD API", url = "https://api.steamcmd.net/v1/info/1091500", kind = "json" },
+			{ name = "SteamCounts", url = "https://steamcounts.info/app/1091500", kind = "html" },
+			{ name = "SteamDB", url = "https://steamdb.info/app/1091500/depots/", kind = "html" },
+			{ name = "HubcapDB", url = "https://hubcapmanifest.com/", kind = "html" },
+			{ name = "SMD", url = "https://smd.mcbabel.de", kind = "html" },
+			{ name = "opensteamdb-api", url = "https://opensteamdb-api.invalid/api/app/1/info", kind = "json" },
+			{ name = "Ryuu Manifests", url = "https://manifest-api.ryuu.space/", kind = "json" },
+			{ name = "Open-SteamDB", url = "https://opensteamdb.net/", kind = "html" },
+			{ name = "Steam AppDB", url = "https://steamappdb.net/", kind = "html" },
+		}
+		local results = {}
+		for _, source in ipairs(sources) do
+			local ok, res = pcall(http.get, source.url, {
+				timeout = 8,
+				user_agent = "VersionRollback/0.1 (probe)",
+				headers = { ["Accept"] = source.kind == "json" and "application/json" or "text/html" },
+			})
+			local status, kind = 0, "dead"
+			if ok and res then
+				status = res.status or 0
+				local body = res.body or ""
+				if status == 401 or status == 403 then
+					kind = "need-auth"
+				elseif status >= 400 or status == 0 then
+					kind = "dead"
+				elseif body:find("^%s*[{%[]") then
+					kind = "json"
+				else
+					kind = "html"
+				end
+			end
+			results[#results + 1] = { name = source.name, url = source.url, status = status, kind = kind }
+		end
+		return { ok = true, results = results }
+	end)
+end
+
+--- Собрать по одной игре (короткий вызов — чтобы не упереться в таймаут RPC).
+---@ffi
+---@param appid string
+---@param force boolean
+---@return string JSON сводка по игре
+function collect_app(appid, force)
+	return json_call(function()
+		if not local_collect_allowed() then
+			return { ok = false, error = "сбор не разрешён: сначала согласись в карточке обновления" }
+		end
+		local id = util.norm_id(appid)
+		if not id then
+			return { ok = false, error = "некорректный AppID" }
+		end
+		local db = versiondb.user() or { version = versiondb.VERSION, updated = 0, apps = {} }
+		local row = collector.collect_app(db, id, force == true)
+		versiondb.save_user(db)
+		return {
+			ok = true,
+			appid = id,
+			builds = row.builds,
+			manifests = row.manifests,
+			errors = row.errors,
+		}
+	end)
+end
+
+--- Собрать по ВСЕМ установленным играм: локальные кэши + SteamRaw + SteamCounts.
+---@ffi
+---@param force boolean
+---@return string JSON сводка
+function collect_all(force)
+	return json_call(function()
+		if not local_collect_allowed() then
+			return { ok = false, error = "сбор не разрешён: сначала согласись в карточке обновления" }
+		end
+		local summary = collector.collect_all(force == true)
+		summary.ok = true
+		return summary
+	end)
+end
+
+--- Отчёт о собранном + ссылка на создание Issue на GitHub.
+---@ffi
+---@return string JSON { body, url, stats }
+function get_collection_report()
+	return json_call(function()
+		if not local_collect_allowed() then
+			return { ok = false, error = "сбор не разрешён" }
+		end
+		local body, stats = collector.report()
+		local url, truncated = collector.issue_url(body, "Сбор версий Steam: " .. tostring(stats.apps) .. " игр")
+		return {
+			ok = true,
+			body = body,
+			url = url,
+			truncated = truncated,
+			stats = stats,
+		}
+	end)
+end
+
+--- Создать Issue на GitHub через API (нужен личный токен в настройках).
+---@ffi
+---@return string JSON
+function post_github_issue()
+	return json_call(function()
+		if not local_collect_allowed() then
+			return { ok = false, error = "сбор не разрешён" }
+		end
+		local token = tostring(cfg_get("github_token", ""))
+		if token == "" then
+			return { ok = false, error = "не задан токен GitHub — используйте кнопку «Открыть Issue»" }
+		end
+		local body, stats = collector.report()
+		local title = "Сбор версий Steam: " .. tostring(stats.apps) .. " игр, " .. tostring(stats.builds) .. " сборок"
+		local payload = util.encode_json({
+			title = title,
+			body = body,
+			labels = { "version-data" },
+		})
+		local url = "https://api.github.com/repos/" .. collector.REPO .. "/issues"
+		local headers = {
+			["Authorization"] = "Bearer " .. token,
+			["Accept"] = "application/vnd.github+json",
+			["Content-Type"] = "application/json",
+			["User-Agent"] = "VersionRollback/0.3 (Millennium plugin)",
+		}
+		local ok, res = pcall(function()
+			if http.post then
+				return http.post(url, { headers = headers, body = payload, timeout = 25 })
+			end
+			return http.request(url, { method = "POST", headers = headers, body = payload, timeout = 25 })
+		end)
+		if not ok or not res then
+			return { ok = false, error = "GitHub API: " .. tostring(res) }
+		end
+		if res.status ~= 201 and res.status ~= 200 then
+			return { ok = false, error = "GitHub API вернул HTTP " .. tostring(res.status) .. ": " .. tostring(res.body or "") }
+		end
+		local decoded = util.decode_json(res.body or "")
+		return {
+			ok = true,
+			number = decoded and decoded.number,
+			url = decoded and decoded.html_url,
+			stats = stats,
+		}
+	end)
+end
+
+--- Сохранить токен GitHub (нужен только для автосоздания Issue).
+---@ffi
+---@param token string
+---@return string JSON
+function set_github_token(token)
+	return json_call(function()
+		local value = tostring(token or ""):gsub("%s", "")
+		if value == "" then
+			pcall(millennium.config.set, "github_token", "")
+			return { ok = true, saved = false }
+		end
+		pcall(millennium.config.set, "github_token", value)
+		return { ok = true, saved = true, hint = "токен сохранён в настройках Millennium" }
+	end)
+end
+
+---@ffi
+---@param appid string
 ---@return string JSON plan
 function get_plan(appid, selection_json, options_json)
 	return json_call(function()

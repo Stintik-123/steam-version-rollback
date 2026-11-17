@@ -39,6 +39,23 @@ export const api = {
 	getApp: (appid: string, force = false) => call<any>('get_app', String(appid), force),
 	getPlan: (appid: string, selection: object, options: object) =>
 		call<any>('get_plan', String(appid), JSON.stringify(selection), JSON.stringify(options)),
+	getVersions: (appid: string, branch: string, force = false) =>
+		call<any>('get_versions', String(appid), String(branch), force),
+	getLocalCache: (appid: string) => call<any>('get_local_cache', String(appid)),
+	importManifests: (appid: string, text: string) => call<any>('import_manifests', String(appid), String(text)),
+	getDbSummary: (appid: string) => call<any>('get_db_summary', String(appid)),
+	collectLocal: (appid: string) => call<any>('collect_local', String(appid)),
+	saveLocalDb: (appid: string) => call<any>('save_local_db', String(appid)),
+	exportLocal: (appid: string) => call<any>('export_local', String(appid)),
+	getSteamCounts: (appid: string, force = false) => call<any>('get_steamcounts', String(appid), force),
+	addSteamCountsDb: (appid: string) => call<any>('add_steamcounts_db', String(appid)),
+	probeSources: () => call<any>('probe_sources'),
+	collectAll: (force = false) => call<any>('collect_all', force),
+	collectApp: (appid: string, force = false) => call<any>('collect_app', String(appid), force),
+	getCollectionReport: () => call<any>('get_collection_report'),
+	postGithubIssue: () => call<any>('post_github_issue'),
+	setGithubToken: (token: string) => call<any>('set_github_token', String(token)),
+	debugNote: (text: string) => call<any>('debug_note', String(text)),
 	start: (appid: string, selection: object, options: object, mode: 'download' | 'swap') =>
 		call<any>('start_download', String(appid), JSON.stringify(selection), JSON.stringify(options), mode),
 	tick: () => call<any>('tick'),

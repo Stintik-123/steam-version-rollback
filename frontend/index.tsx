@@ -13,9 +13,16 @@
 
 import { definePlugin } from 'millennium';
 
-import { startBetasSection } from './inject';
+import { startBetasSection, startLibraryDock } from './inject';
 import { api } from './lib/rpc';
-import { VersionPanel } from './ui/VersionPanel';
+
+// Диагностика: заголовок окна виден снаружи (list-windows), в отличие от консоли.
+try {
+	document.title = 'VRB boot';
+	localStorage.setItem('vrb-diag', 'boot ' + new Date().toISOString());
+} catch {
+	/* игнорируем */
+}
 
 type SteamConsole = {
 	Console?: { ExecCommand?: (command: string) => void; ExecuteCommand?: (command: string) => void };
@@ -53,6 +60,9 @@ const Icon = () => (
 	</svg>
 );
 
+const g = globalThis as unknown as { SP_REACTDOM?: unknown };
+console.error('[VRTEST] bundle loaded, reactDom=' + typeof g.SP_REACTDOM);
+
 /**
  * Самопроверка связи с Lua-бэкендом: пишет в консоль Steam UI одну строку,
  * по которой видно, работает ли RPC. Полезно и пользователю при разборе проблем.
@@ -62,10 +72,12 @@ const probeBackend = async (): Promise<void> => {
 		try {
 			const result = await api.ping();
 			console.info('[Version Rollback] backend ok ' + JSON.stringify(result));
+			api.debugNote('backend ok ' + JSON.stringify(result)).catch((): void => undefined);
 			return;
 		} catch (error) {
 			if (attempt === 8) {
 				console.error('[Version Rollback] backend недоступен: ' + String(error));
+				api.debugNote('backend fail: ' + String(error)).catch((): void => undefined);
 				return;
 			}
 			await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -73,18 +85,28 @@ const probeBackend = async (): Promise<void> => {
 	}
 };
 
-export default definePlugin(() => {
-	try {
-		startBetasSection();
-	} catch (error) {
-		console.error('[Version Rollback] не удалось запустить вставку в свойства игры:', error);
-	}
+export default definePlugin(() => ({
+	title: 'Version Rollback',
+	icon: <Icon />,
+	content: (
+		<div id="version-rollback-settings-root" style={{ padding: '8px 0', fontSize: '13px', lineHeight: 1.5 }}>
+			<div>Панель выбора версии теперь в разделе «Библиотека» — кнопка в правом нижнем углу.</div>
+			<div style={{ opacity: 0.7, fontSize: '12px', marginTop: '6px' }}>
+				Здесь осталась только справка: настройки Millennium не место для выбора версии игры. Для конкретной игры откройте
+				Свойства → «Версии и бета-версии».
+			</div>
+		</div>
+	),
+}));
 
-	void probeBackend();
+// Важно: тело definePlugin Millennium вызывает лениво (при открытии своей страницы
+// настроек), поэтому вставку в свойства и самопроверку RPC запускаем сразу при
+// загрузке бандла.
+try {
+	startBetasSection();
+	startLibraryDock();
+} catch (error) {
+	console.error('[Version Rollback] не удалось запустить вставку в свойства игры:', error);
+}
 
-	return {
-		title: 'Version Rollback',
-		icon: <Icon />,
-		content: <VersionPanel />,
-	};
-});
+void probeBackend();

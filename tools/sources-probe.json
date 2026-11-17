@@ -1,0 +1,132 @@
+{
+	"appid": "1091500",
+	"at": "2026-11-17T08:29:14.617Z",
+	"results": [
+		{
+			"id": 1,
+			"name": "SteamRaw /app",
+			"kind": "json",
+			"url": "https://steamraw.com/api/app/1091500",
+			"status": 200,
+			"size": 1929,
+			"sample": "{\"appid\":1091500,\"name\":\"Cyberpunk 2077\",\"type\":\"game\",\"parent_appid\":null,\"developer\":\"CD PROJEKT RED\",\"publisher\":\"CD "
+		},
+		{
+			"id": 1,
+			"name": "SteamRaw /builds",
+			"kind": "html",
+			"url": "https://steamraw.com/api/app/1091500/builds",
+			"status": 200,
+			"size": 1144,
+			"sample": "[{\"appid\":1091500,\"branch\":\"public\",\"buildid\":26161058,\"time_updated\":1792762404,\"seen_at\":1792762414},{\"appid\":1091500,"
+		},
+		{
+			"id": 1,
+			"name": "SteamRaw /history",
+			"kind": "html",
+			"url": "https://steamraw.com/api/app/1091500/history",
+			"status": 200,
+			"size": 44120,
+			"sample": "[{\"id\":1924630,\"appid\":1091500,\"changenumber\":40170744,\"ts\":1792762414,\"key\":\"depots.branches.public.timebuildupdated\",\""
+		},
+		{
+			"id": 1,
+			"name": "SteamRaw /changelists",
+			"kind": "html",
+			"url": "https://steamraw.com/api/app/1091500/changelists",
+			"status": 200,
+			"size": 5774,
+			"sample": "[{\"changenumber\":41055552,\"seen_at\":1794869864,\"app_count\":1,\"package_count\":0},{\"changenumber\":40587073,\"seen_at\":17937"
+		},
+		{
+			"id": 2,
+			"name": "SteamCounts (HTML)",
+			"kind": "html",
+			"url": "https://steamcounts.info/app/1091500",
+			"status": 200,
+			"size": 37923,
+			"sample": "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-sc"
+		},
+		{
+			"id": 3,
+			"name": "SteamDB (HTML, автопарсинг запрещён)",
+			"kind": "need-auth",
+			"url": "https://steamdb.info/app/1091500/depots/",
+			"status": 403,
+			"size": 10571,
+			"sample": "<!doctype html> <html lang=\"en\"> <head> <meta charset=\"UTF-8\"> <meta name=\"viewport\" content=\"width=device-width, init"
+		},
+		{
+			"id": 4,
+			"name": "opensteamdb-api (только self-host)",
+			"kind": "dead",
+			"url": "https://opensteamdb-api.example/api/app/1/info",
+			"status": 0,
+			"size": 0,
+			"sample": "fetch failed"
+		},
+		{
+			"id": 6,
+			"name": "HubcapDB",
+			"kind": "html",
+			"url": "https://hubcapmanifest.com/api/depots?appid=1091500",
+			"status": 200,
+			"size": 2391,
+			"sample": "<!doctype html> <html lang=\"en\" class=\"dark\"> <head> <meta charset=\"UTF-8\" /> <link rel=\"preconnect\" href=\"htt"
+		},
+		{
+			"id": 7,
+			"name": "Ryuu's Manifests",
+			"kind": "dead",
+			"url": "https://manifest-api.ryuu.space/api/app/1091500",
+			"status": 0,
+			"size": 0,
+			"sample": "fetch failed"
+		},
+		{
+			"id": 8,
+			"name": "SMD (smd.mcbabel.de)",
+			"kind": "html",
+			"url": "https://smd.mcbabel.de",
+			"status": 200,
+			"size": 58459,
+			"sample": "<!DOCTYPE html> <html lang=\"en\"> <head> <meta charset=\"utf-8\"> <meta name=\"viewport\" content=\"width=device-width, initia"
+		},
+		{
+			"id": 12,
+			"name": "SteamWebPipes (репозиторий)",
+			"kind": "html",
+			"url": "https://github.com/SteamDatabase/SteamTracking",
+			"status": 200,
+			"size": 256593,
+			"sample": " <!DOCTYPE html> <html lang=\"en\" data-color-mode=\"auto\" data-light-theme=\"light\" data-dark-theme=\"dark\" "
+		},
+		{
+			"id": 13,
+			"name": "Open-SteamDB",
+			"kind": "dead",
+			"url": "https://opensteamdb.net/api/apps/1091500",
+			"status": 0,
+			"size": 0,
+			"sample": "fetch failed"
+		},
+		{
+			"id": 14,
+			"name": "Steam AppDB",
+			"kind": "dead",
+			"url": "https://steamappdb.net/api/apps/1091500",
+			"status": 0,
+			"size": 0,
+			"sample": "fetch failed"
+		},
+		{
+			"id": 17,
+			"name": "SteamCMD API",
+			"kind": "json",
+			"url": "https://api.steamcmd.net/v1/info/1091500",
+			"status": 200,
+			"size": 24183,
+			"sample": "{\"data\": {\"1091500\": {\"_change_number\": 41055552, \"_missing_token\": false, \"_sha\": \"52c547d557f989d9ba6229188ab2f60fe1ef"
+		}
+	]
+}

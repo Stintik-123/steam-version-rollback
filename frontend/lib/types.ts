@@ -64,7 +64,7 @@ export type AppState = {
 		size_on_disk: number;
 		depot_count: number;
 	}[];
-	config?: { mode: string; include_dlc: boolean; languages: string; delay_updates: boolean; last_appid: string };
+	config?: { mode: string; include_dlc: boolean; languages: string; delay_updates: boolean; local_collect?: boolean; last_appid: string };
 };
 
 export type AppDetail = {
@@ -74,6 +74,97 @@ export type AppDetail = {
 	acf?: AcfInfo | null;
 	branches?: BranchInfo[];
 	backups?: { dirname: string; path: string; created: number; label: string }[];
+};
+
+/** Одна сборка из истории SteamRaw или из базы версий. */
+export type VersionEntry = {
+	buildid: string;
+	ts: number;
+	branch: string;
+	depots: Record<string, string>;
+	complete: boolean;
+	source?: string;
+};
+
+export type VersionsResult = {
+	ok: boolean;
+	error?: string;
+	app_name?: string;
+	branch?: string;
+	versions?: VersionEntry[];
+	db?: { in_db?: boolean; builds?: number; manifests?: number; name?: string };
+	warning?: string;
+};
+
+/** Результат локального сбора: что нашлось на машине и чего нет в базе. */
+export type LocalCollectResult = {
+	ok: boolean;
+	error?: string;
+	total?: number;
+	known?: { depotid: string; gid: string; source: string }[];
+	missing?: { depotid: string; gid: string; source: string }[];
+	build?: { buildid: string; branch: string; ts: number; depots: Record<string, string>; in_db: boolean };
+};
+
+/** SteamCounts: текущие депо и датированная история обновлений. */
+export type SteamCountsResult = {
+	ok: boolean;
+	error?: string;
+	source?: string;
+	depots?: { depotid: string; gid: string; size: number; os: string }[];
+	updates?: {
+		ts: number;
+		branch: string;
+		buildid: string;
+		prev_buildid?: string;
+		depots_changed: number;
+		changelist?: string;
+	}[];
+};
+
+/** Живая проверка доступности источников. */
+export type SourcesProbeResult = {
+	ok: boolean;
+	results?: { name: string; url: string; status: number; kind: string }[];
+};
+
+/** Сводка сбора по всем установленным играм. */
+export type CollectSummary = {
+	ok: boolean;
+	error?: string;
+	total_apps?: number;
+	builds?: number;
+	manifests?: number;
+	errors?: number;
+	saved_to?: string;
+	apps?: { appid: string; name?: string; builds: number; manifests: number; errors: string[] }[];
+};
+
+/** Отчёт для GitHub Issue. */
+export type CollectionReport = {
+	ok: boolean;
+	error?: string;
+	body?: string;
+	url?: string;
+	truncated?: boolean;
+	stats?: { apps: number; builds: number; manifests: number };
+};
+
+/** Локальный кэш Steam: какие манифесты Steam уже видел на этой машине. */
+export type LocalCacheResult = {
+	ok: boolean;
+	error?: string;
+	appid?: string;
+	entry_count?: number;
+	depots?: { depotid: string; gids: string[] }[];
+};
+
+/** Разбор вручную вставленного списка депо -> GID. */
+export type ImportResult = {
+	ok: boolean;
+	error?: string;
+	rows?: { depotid: string; gid: string }[];
+	problems?: string[];
 };
 
 export type JobRow = {

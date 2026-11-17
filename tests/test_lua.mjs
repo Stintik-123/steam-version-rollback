@@ -89,6 +89,7 @@ try {
 	// Данные для Lua-скриптов.
 	setGlobal('FIXTURE_ACF', fs.readFileSync(path.join(here, 'fixtures', 'appmanifest_1091500.acf'), 'utf8'));
 	setGlobal('FIXTURE_LIBRARYFOLDERS', fs.readFileSync(path.join(here, 'fixtures', 'libraryfolders.vdf'), 'utf8'));
+	setGlobal('FIXTURE_STEAMCOUNTS', fs.readFileSync(path.join(here, 'fixtures', 'steamcounts_1091500.html'), 'utf8'));
 	setGlobal('ENTRY_SOURCE', fs.readFileSync(path.join(root, 'backend', 'main.lua'), 'utf8'));
 
 	// 2. Заглушки и юнит-тесты.

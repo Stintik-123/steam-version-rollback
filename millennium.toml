@@ -1,9 +1,9 @@
-[plugin]
+﻿[plugin]
 id = "com.versionrollback.steam"
 name = "Version Rollback"
-version = "0.1.0"
+version = "0.3.2"
 author = "Stintik-123"
-description = "Скачивание и откат конкретной версии игры: выбор ветки/манифеста, загрузка депо через сам Steam, бэкап и подмена файлов."
+description = "Качай и откатывай версии игры: ветки/Manifest'ы, загрузка депо самой Steam, подмена файлов. Сбор метаданных о версиях с этого ПК — только по вашему согласию и только вручную: наружу уходят лишь пары depotid → GID, без аккаунта и без ключей депо."
 
 [assets]
 resources = ["resources/**/*"]
@@ -18,7 +18,7 @@ sources = ["backend/main.lua"]
 entry = "frontend/index.tsx"
 
 [compiler]
-# auto = собрать и положить плагин прямо в установленный Millennium
+# auto = собрать и положить плагин в папку установки Millennium
 output_path = "auto"
 
 [dev]
@@ -37,5 +37,7 @@ backend_prefix = "VRB-BCK"
 frontend_prefix = "VRB-FRT"
 
 [patches]
-# true = Millennium логирует, какие патчи применились (нужно при подборе хуков)
+# true = Millennium логирует, какие патчи применились (нужно для отладки)
 debug = true
+
+

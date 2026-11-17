@@ -176,4 +176,38 @@ function util.fmt_bytes(n)
 	return string.format("%.1f %s", n, units[i])
 end
 
+--- Percent-encoding для URL (в Lua нет готового, а UTF-8 надо экранировать).
+function util.url_encode(text)
+	text = tostring(text or "")
+	local out = {}
+	for i = 1, #text do
+		local byte = text:byte(i)
+		local char = text:sub(i, i)
+		if
+			(byte >= 48 and byte <= 57) -- 0-9
+			or (byte >= 65 and byte <= 90) -- A-Z
+			or (byte >= 97 and byte <= 122) -- a-z
+			or char == "-" or char == "_" or char == "." or char == "~"
+		then
+			out[#out + 1] = char
+		else
+			out[#out + 1] = string.format("%%%02X", byte)
+		end
+	end
+	return table.concat(out)
+end
+
+--- Дата в UTC. В некоторых сборках LuaVM нет os.date — тогда отдаём timestamp.
+function util.date_utc(ts)
+	ts = tonumber(ts) or 0
+	if ts <= 0 then
+		return "?"
+	end
+	local ok, formatted = pcall(os.date, "!%Y-%m-%d %H:%M UTC", ts)
+	if ok and type(formatted) == "string" then
+		return formatted
+	end
+	return tostring(ts)
+end
+
 return util

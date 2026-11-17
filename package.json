@@ -4,6 +4,7 @@
   "scripts": {
     "dev": "starlight watch",
     "backend": "node tools/bundle-backend.mjs",
+    "db": "node tools/build-versions-db.mjs",
     "build": "node tools/bundle-backend.mjs && starlight pack",
     "lsp": "starlight lsp",
     "pack": "node tools/bundle-backend.mjs && starlight pack -o build",
