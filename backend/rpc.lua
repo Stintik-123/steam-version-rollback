@@ -140,15 +140,8 @@ end
 ---@ffi
 ---@return string JSON
 function ping()
-	return json_call(function()
-		return {
-			ok = true,
-			millennium = millennium.version(),
-			steam_path = steam.path(),
-			windows = util.is_windows(),
-			data_dir = util.data_dir(),
-		}
-	end)
+	-- Намеренно без cjson: проверяем, не в нём ли причина падения хоста.
+	return '{"ok":true,"probe":"raw"}'
 end
 
 ---@ffi

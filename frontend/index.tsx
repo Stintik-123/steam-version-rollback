@@ -13,16 +13,56 @@
 
 import { definePlugin } from 'millennium';
 
-import { startBetasSection, startLibraryDock } from './inject';
+import { startBetasSection } from './inject';
 import { api } from './lib/rpc';
+import { mountDock } from './ui/dock';
 
-// Диагностика: заголовок окна виден снаружи (list-windows), в отличие от консоли.
+/** Диагностика: одна метка на запуск, чтобы было видно, что бандл исполнился. */
 try {
-	document.title = 'VRB boot';
 	localStorage.setItem('vrb-diag', 'boot ' + new Date().toISOString());
+	const w = globalThis as unknown as Record<string, unknown>;
+	const keys = Object.keys(w).filter((key) => /backend|ffi|millennium/i.test(key));
+	localStorage.setItem(
+		'vrb-env',
+		JSON.stringify({
+			backend: typeof w.backend,
+			ffi: typeof w.MILLENNIUM_PRIVATE_INTERNAL_FOREIGN_FUNCTION_INTERFACE_DO_NOT_USE,
+			keys,
+		}),
+	);
 } catch {
 	/* игнорируем */
 }
+
+/**
+ * Проба RPC: повторяем, пока бэкенд не ответит. Результат — в localStorage
+ * 'vrb-probe' (читается снаружи из LevelDB).
+ */
+const probeBackendCalls = async (): Promise<void> => {
+	try {
+		const result = await api.ping();
+		try {
+			localStorage.setItem('vrb-probe', 'ok ' + JSON.stringify(result).slice(0, 200));
+		} catch {
+			/* игнорируем */
+		}
+		return;
+	} catch (error) {
+		try {
+			localStorage.setItem('vrb-probe', 'fail ' + String(error).slice(0, 200));
+		} catch {
+			/* игнорируем */
+		}
+	}
+};
+
+let probeAttempt = 0;
+const probeTimer = window.setInterval((): void => {
+	probeAttempt += 1;
+	void probeBackendCalls();
+	if (probeAttempt >= 8) window.clearInterval(probeTimer);
+}, 15000);
+window.setTimeout((): void => void probeBackendCalls(), 5000);
 
 type SteamConsole = {
 	Console?: { ExecCommand?: (command: string) => void; ExecuteCommand?: (command: string) => void };
@@ -72,11 +112,21 @@ const probeBackend = async (): Promise<void> => {
 		try {
 			const result = await api.ping();
 			console.info('[Version Rollback] backend ok ' + JSON.stringify(result));
+			try {
+				localStorage.setItem('vrb-probe', 'ok ' + JSON.stringify(result));
+			} catch {
+				/* игнорируем */
+			}
 			api.debugNote('backend ok ' + JSON.stringify(result)).catch((): void => undefined);
 			return;
 		} catch (error) {
 			if (attempt === 8) {
 				console.error('[Version Rollback] backend недоступен: ' + String(error));
+				try {
+					localStorage.setItem('vrb-probe', 'fail ' + String(error));
+				} catch {
+					/* игнорируем */
+				}
 				api.debugNote('backend fail: ' + String(error)).catch((): void => undefined);
 				return;
 			}
@@ -103,8 +153,14 @@ export default definePlugin(() => ({
 // настроек), поэтому вставку в свойства и самопроверку RPC запускаем сразу при
 // загрузке бандла.
 try {
-	startBetasSection();
-	startLibraryDock();
+	// временно выключено для диагностики
+	void mountDock;
+} catch (error) {
+	console.error('[Version Rollback] не удалось поставить кнопку в библиотеке:', error);
+}
+
+try {
+	void startBetasSection;
 } catch (error) {
 	console.error('[Version Rollback] не удалось запустить вставку в свойства игры:', error);
 }

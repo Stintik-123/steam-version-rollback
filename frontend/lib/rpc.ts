@@ -7,9 +7,12 @@
 
 type RpcTable = Record<string, (...args: any[]) => any>;
 
+const PLUGIN_ID = 'com.versionrollback.steam';
+
 /**
- * starlight генерирует `backend` как свободную переменную бандла, а не свойство
- * globalThis — поэтому сначала пробуем её, и только потом window.backend.
+ * starlight подставляет `backend` только в статические вызовы `backend.foo(...)`.
+ * Наши вызовы динамические, поэтому `backend` в window нет — используем приватный
+ * FFI-биндер Millennium: call(0 = CALL_SERVER_METHOD, plugin, method, args).
  */
 declare const backend: RpcTable | undefined;
 
@@ -18,13 +21,66 @@ const rpc = (): RpcTable | undefined => {
 	return (globalThis as any).backend ?? (globalThis as any).__vrBackend;
 };
 
-/** Вызвать backend.<fn>, распарсить JSON-ответ. */
-async function call<T>(fn: string, ...args: any[]): Promise<T> {
-	const b = rpc();
-	if (!b || typeof b[fn] !== 'function') {
-		throw new Error(`бэкенд недоступен (backend.${fn}) — плагин включён? Millennium >= 3.4?`);
+const unwrap = (result: any): any => {
+	if (result && typeof result === 'object' && 'success' in result) {
+		if (!result.success) throw new Error(String(result.error ?? 'FFI вернул ошибку'));
+		return result.returnJson;
 	}
-	const raw = await b[fn](...args);
+	return result;
+};
+
+/**
+ * Имена аргументов для каждой RPC-функции. Millennium передаёт их объектом
+ * (callServerMethod(plugin, method, kwargs)), поэтому позиционные аргументы
+ * раскладываем по именам — так же, как это делает шаблонный плагин.
+ */
+const ARG_NAMES: Record<string, string[]> = {
+	ping: [],
+	get_state: [],
+	get_app: ['appid', 'force'],
+	get_plan: ['appid', 'selection_json', 'options_json'],
+	get_versions: ['appid', 'branch', 'force'],
+	start_download: ['appid', 'selection_json', 'options_json', 'mode'],
+	tick: [],
+	cancel_download: [],
+	reset_batch: [],
+	mark_ready: ['depotid'],
+	apply_swap: ['appid'],
+	restore_backup: ['appid', 'dirname'],
+	list_backups: ['appid'],
+	delay_updates: ['appid', 'enable'],
+	open_folder: ['path'],
+	open_content_folder: ['appid'],
+	set_setting: ['key', 'value'],
+	get_log: [],
+	debug_note: ['text'],
+};
+
+const toKwargs = (fn: string, args: any[]): Record<string, any> => {
+	const names = ARG_NAMES[fn] ?? [];
+	const kwargs: Record<string, any> = {};
+	names.forEach((name, index) => {
+		kwargs[name] = args[index];
+	});
+	return kwargs;
+};
+
+/** Вызов бэкенда: сначала callServerMethod (рабочий путь), затем таблица backend. */
+async function callRaw(fn: string, args: any[]): Promise<any> {
+	const table = rpc();
+	if (table && typeof table[fn] === 'function') return unwrap(await table[fn](...args));
+
+	const millennium = (globalThis as any).Millennium ?? (globalThis as any).MILLENNIUM_API;
+	if (typeof millennium?.callServerMethod === 'function') {
+		return unwrap(await millennium.callServerMethod(PLUGIN_ID, fn, toKwargs(fn, args)));
+	}
+
+	throw new Error('бэкенд недоступен: нет Millennium.callServerMethod');
+}
+
+/** Вызвать функцию бэкенда, распарсить JSON-ответ. */
+async function call<T>(fn: string, ...args: any[]): Promise<T> {
+	const raw = await callRaw(fn, args);
 	if (typeof raw !== 'string') return (raw ?? {}) as T;
 	try {
 		return JSON.parse(raw) as T;

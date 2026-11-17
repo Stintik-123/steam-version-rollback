@@ -162,7 +162,6 @@ export const startBetasSection = (): void => {
 			}
 			reportedNoMarker = false;
 			try {
-				document.title = 'VRB mount ' + (appid ?? 'none');
 				localStorage.setItem('vrb-mounted', String(appid ?? 'none') + ' ' + new Date().toISOString());
 			} catch {
 				/* игнорируем */

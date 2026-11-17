@@ -1,7 +1,7 @@
 ﻿[plugin]
 id = "com.versionrollback.steam"
 name = "Version Rollback"
-version = "0.3.2"
+version = "0.5.4"
 author = "Stintik-123"
 description = "Качай и откатывай версии игры: ветки/Manifest'ы, загрузка депо самой Steam, подмена файлов. Сбор метаданных о версиях с этого ПК — только по вашему согласию и только вручную: наружу уходят лишь пары depotid → GID, без аккаунта и без ключей депо."
 
@@ -39,5 +39,27 @@ frontend_prefix = "VRB-FRT"
 [patches]
 # true = Millennium логирует, какие патчи применились (нужно для отладки)
 debug = true
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 

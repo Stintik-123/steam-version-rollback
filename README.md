@@ -1,5 +1,12 @@
 # Version Rollback
 
+> **Состояние на 17.11.2026 (версия 0.5.4), передача в работу**
+>
+> - Бэкенд собирается в один `backend/main.lua` и **работает**: `millennium.ready()` вызывается, RPC `ping` отвечает (`{"ok":true,"probe":"raw"}`).
+> - **Известная проблема:** при включённом монтировании UI (`mountDock()` / `startBetasSection()`) Lua-хост падает с `0xC0000409 (Stack Buffer Overrun)` сразу после старта, и Millennium показывает кран-диалог. Поэтому оба вызова в `frontend/index.tsx` сейчас заменены на `void mountDock;` / `void startBetasSection;` — плагин грузится без падений, но своей кнопки в интерфейсе не показывает.
+> - RPC идёт через `Millennium.callServerMethod(pluginId, method, kwargs)` — это единственный рабочий путь в этой сборке Millennium (глобального `backend` нет).
+> - Что проверять дальше: минимальный репро-плагин, который монтирует пустой `<div>` через `SP_REACTDOM`, чтобы понять, что именно роняет хост: сам ReactDOM-мост, `document.body.append` или размер бандла.
+
 Плагин Millennium для Steam: поставить конкретную версию игры вместо текущей.
 
 Вы выбираете ветку (включая legacy-ветки разработчика) или вбиваете manifest GID

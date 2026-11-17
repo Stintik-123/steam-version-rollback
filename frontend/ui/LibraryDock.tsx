@@ -9,6 +9,7 @@
 
 import { useState } from 'react';
 
+import { PanelErrorBoundary } from './PanelErrorBoundary';
 import { VersionPanel } from './VersionPanel';
 
 const pillStyle = {
@@ -87,7 +88,9 @@ export const LibraryDock = () => {
 				</button>
 			</div>
 			<div style={bodyStyle}>
-				<VersionPanel context="library" />
+				<PanelErrorBoundary onClose={() => setOpen(false)}>
+					<VersionPanel context="library" />
+				</PanelErrorBoundary>
 			</div>
 		</div>
 	);
