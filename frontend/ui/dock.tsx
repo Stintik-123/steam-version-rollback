@@ -5,6 +5,10 @@
  * Steam в этой сборке нет нужного API, кнопка всё равно обязана появиться —
  * иначе пользователь просто не находит плагин. React используется только внутри
  * раскрытой панели, и его отсутствие показывается текстом.
+ *
+ * ВАЖНО (стабильность): здесь НЕТ setInterval. Раньше кнопка пересоздавалась
+ * интервалом каждые 1.5 с — теперь её наличие проверяет MutationObserver из
+ * inject.tsx и зовёт ensureDock() только когда кнопку действительно выкинули.
  */
 
 import { PanelErrorBoundary } from './PanelErrorBoundary';
@@ -36,7 +40,7 @@ const closeCss =
 	'cursor:pointer;padding:0 4px;';
 
 type ReactDom = {
-	createRoot?: (el: Element) => { render: (node: unknown) => void; unmount: () => void };
+	createRoot?: (el: Element) => { render: (node: unknown) => void; unmount: () => void } | null;
 	render?: (node: unknown, el: Element) => void;
 	unmountComponentAtNode?: (el: Element) => void;
 };
@@ -45,7 +49,7 @@ const reactDom = (): ReactDom | undefined => (globalThis as unknown as { SP_REAC
 
 let panelRoot: { unmount: () => void } | null = null;
 
-const closePanel = (): void => {
+export const closePanel = (): void => {
 	document.getElementById(PANEL_ID)?.remove();
 	try {
 		panelRoot?.unmount();
@@ -90,6 +94,7 @@ const openPanel = (container: HTMLElement): void => {
 	try {
 		if (dom.createRoot) {
 			const root = dom.createRoot(body);
+			if (!root) throw new Error('createRoot вернул null');
 			root.render(
 				<PanelErrorBoundary onClose={() => closePanel()}>
 					<VersionPanel context="library" />
@@ -110,11 +115,16 @@ const openPanel = (container: HTMLElement): void => {
 			body.textContent = 'Панель недоступна: ReactDOM без createRoot/render.';
 		}
 	} catch (error) {
+		// React не смог — показываем текст вместо падения всего окна.
 		body.textContent = 'Не удалось открыть панель: ' + String(error);
 	}
 };
 
-const buildDock = (): void => {
+/**
+ * Идемпотентно ставит кнопку в правый нижний угол. Вызывается из inject.tsx
+ * по событию DOM-мутаций (и один раз при старте), НЕ интервалом.
+ */
+export const ensureDock = (): void => {
 	if (document.getElementById(DOCK_ID)) return;
 	// В настройках плагина панель не нужна.
 	if (document.getElementById(SETTINGS_ROOT_ID)) return;
@@ -137,26 +147,11 @@ const buildDock = (): void => {
 
 	container.append(button);
 	document.body.append(container);
-	try {
-		localStorage.setItem('vrb-dock', new Date().toISOString());
-	} catch {
-		/* игнорируем */
-	}
 	console.info('[Version Rollback] кнопка добавлена в библиотеку');
 };
 
-/** Ставит кнопку и следит, чтобы Steam не выкинул её при перерисовке страницы. */
-export const mountDock = (): void => {
-	try {
-		buildDock();
-	} catch (error) {
-		console.error('[Version Rollback] не удалось создать кнопку:', error);
-	}
-	setInterval(() => {
-		try {
-			buildDock();
-		} catch (error) {
-			console.error('[Version Rollback] повторная попытка кнопки:', error);
-		}
-	}, 1500);
+/** Убрать кнопку и панель: открыты настройки плагина или UI выгружается. */
+export const removeDock = (): void => {
+	closePanel();
+	document.getElementById(DOCK_ID)?.remove();
 };

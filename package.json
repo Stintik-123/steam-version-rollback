@@ -7,7 +7,7 @@
     "db": "node tools/build-versions-db.mjs",
     "build": "node tools/bundle-backend.mjs && starlight pack",
     "lsp": "starlight lsp",
-    "pack": "node tools/bundle-backend.mjs && starlight pack -o build",
+    "pack": "node tools/bundle-backend.mjs && node -e \"require('fs').mkdirSync('build',{recursive:true})\" && starlight pack -o build",
     "prepare": "starlight lsp",
     "test": "node tests/test_lua.mjs"
   },

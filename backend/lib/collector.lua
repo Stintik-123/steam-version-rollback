@@ -115,9 +115,13 @@ function collector.collect_all(force)
 	return summary
 end
 
---- Тело отчёта для GitHub Issue: то, что собрано на этой машине (локальная база).
+--- Отчёт для GitHub Issue: то, что собрано на этой машине (локальная база).
+--- Без аргумента — по всем играм локальной базы, с appid — только по одной
+--- игре (карточка согласия и ручной сбор в настройках).
+--- @param appid_filter string|nil
 --- @return string body, table stats
-function collector.report()
+function collector.report(appid_filter)
+	local filter = appid_filter and tostring(appid_filter) or nil
 	local db = versiondb.user() or { apps = {} }
 	local body, stats = {}, { apps = 0, builds = 0, manifests = 0 }
 	body[#body + 1] = "Сбор метаданных о версиях Steam (только depotid → manifest GID, без ключей депо)."
@@ -127,57 +131,66 @@ function collector.report()
 	body[#body + 1] = ""
 
 	for appid, app in pairs(db.apps or {}) do
-		local builds, manifests = {}, {}
-		for buildid, build in pairs(app.builds or {}) do
-			local depots = {}
-			local count = 0
-			for depotid, gid in pairs(build.depots or {}) do
-				depots[#depots + 1] = { depotid = depotid, gid = gid }
-				count = count + 1
+		if filter == nil or tostring(appid) == filter then
+			local builds, manifests = {}, {}
+			for buildid, build in pairs(app.builds or {}) do
+				local depots = {}
+				local count = 0
+				for depotid, gid in pairs(build.depots or {}) do
+					depots[#depots + 1] = { depotid = depotid, gid = gid }
+					count = count + 1
+				end
+				if count > 0 then
+					table.sort(depots, function(a, b)
+						return (tonumber(a.depotid) or 0) < (tonumber(b.depotid) or 0)
+					end)
+					builds[#builds + 1] = {
+						buildid = buildid,
+						branch = build.branch or "public",
+						ts = tonumber(build.ts) or 0,
+						depots = depots,
+					}
+				end
 			end
-			if count > 0 then
-				table.sort(depots, function(a, b)
-					return (tonumber(a.depotid) or 0) < (tonumber(b.depotid) or 0)
+			for _, manifest in pairs(app.manifests or {}) do
+				manifests[#manifests + 1] = manifest
+			end
+			if #builds > 0 or #manifests > 0 then
+				stats.apps = stats.apps + 1
+				table.sort(builds, function(a, b)
+					if a.ts ~= b.ts then
+						return a.ts > b.ts
+					end
+					return tostring(a.buildid) > tostring(b.buildid)
 				end)
-				builds[#builds + 1] = {
-					buildid = buildid,
-					branch = build.branch or "public",
-					ts = tonumber(build.ts) or 0,
-					depots = depots,
-				}
+				table.sort(manifests, function(a, b)
+					if tostring(a.depotid) ~= tostring(b.depotid) then
+						return (tonumber(a.depotid) or 0) < (tonumber(b.depotid) or 0)
+					end
+					return tostring(a.gid) < tostring(b.gid)
+				end)
+				body[#body + 1] = "### " .. tostring(app.name or ("App " .. tostring(appid))) .. " (" .. tostring(appid) .. ")"
+				for _, build in ipairs(builds) do
+					local parts = {}
+					for _, depot in ipairs(build.depots) do
+						parts[#parts + 1] = depot.depotid .. "=" .. depot.gid
+					end
+					local date = build.ts > 0 and util.date_utc(build.ts) or "?"
+					body[#body + 1] = string.format(
+						"- build %s · %s · %s · %s",
+						tostring(build.buildid), tostring(build.branch), date, table.concat(parts, " ")
+					)
+					stats.builds = stats.builds + 1
+				end
+				stats.manifests = stats.manifests + #manifests
+				for _, manifest in ipairs(manifests) do
+					body[#body + 1] = string.format(
+						"- manifest %s → %s (локальный кэш)",
+						tostring(manifest.depotid), tostring(manifest.gid)
+					)
+				end
+				body[#body + 1] = ""
 			end
-		end
-		for key, manifest in pairs(app.manifests or {}) do
-			manifests[#manifests + 1] = manifest
-		end
-		if #builds > 0 or #manifests > 0 then
-			stats.apps = stats.apps + 1
-			table.sort(builds, function(a, b)
-				if a.ts ~= b.ts then
-					return a.ts > b.ts
-				end
-				return tostring(a.buildid) > tostring(b.buildid)
-			end)
-			table.sort(manifests, function(a, b)
-				if tostring(a.depotid) ~= tostring(b.depotid) then
-					return (tonumber(a.depotid) or 0) < (tonumber(b.depotid) or 0)
-				end
-				return tostring(a.gid) < tostring(b.gid)
-			end)
-			body[#body + 1] = "### " .. tostring(app.name or ("App " .. tostring(appid))) .. " (" .. tostring(appid) .. ")"
-			for _, build in ipairs(builds) do
-				local parts = {}
-				for _, depot in ipairs(build.depots) do
-					parts[#parts + 1] = depot.depotid .. "=" .. depot.gid
-				end
-				local date = build.ts > 0 and util.date_utc(build.ts) or "?"
-				body[#body + 1] = string.format(
-					"- build %s · %s · %s · %s",
-					tostring(build.buildid), tostring(build.branch), date, table.concat(parts, " ")
-				)
-				stats.builds = stats.builds + 1
-			end
-			body[#body + 1] = ""
 		end
 	end
 

@@ -1,23 +1,28 @@
 /**
- * Вставка секции Version Rollback в штатную страницу свойств игры
- * «Версии и бета-версии» (Свойства → Версии и бета-версии).
+ * Вставка UI Version Rollback в интерфейс Steam БЕЗ поллинга.
  *
- * Почему DOM-инъекция, а не патч JS: патчи Millennium — это регулярки по
- * минифицированному коду конкретной сборки клиента, они ломаются от любого
- * обновления Steam. Здесь мы ищем уже отрисованную страницу по тексту заголовка
- * «Скрытые версии» и монтируем свой React-корень в её контейнер.
- *
- * Что важно:
- *  - маркеры локализованы, поэтому список языков, а не одна строка;
- *  - контейнер принадлежит React, он может выкинуть наш узел при перерисовке —
- *    поэтому раз в 800 мс проверяем, на месте ли он, и монтируем заново;
- *  - ReactDOM берём у Steam (SP_REACTDOM), чтобы не тащить второй React.
+ * Что здесь изменилось по сравнению с 0.5.x (причина краха 0xC0000409):
+ *  - убраны ВСЕ setInterval: раньше каждые 800 мс сканировался весь документ
+ *    (querySelectorAll по div/span/h2/h3 + getBoundingClientRect у каждого
+ *    листа), а каждые 1.5 с пересоздавалась кнопка — постоянная грелка layout
+ *    в CEF и гонка с перерисовками Steam;
+ *  - вместо этого один MutationObserver с дебаунсом 400 мс: реагируем только
+ *    на реальные изменения DOM, маркер ищем TreeWalker-ом по текстовым узлам
+ *    без принудительного layout;
+ *  - RPC-вызовы при монтировании сведены к минимуму и идут через
+ *    последовательную очередь (lib/rpc.ts) — одновременных callServerMethod
+ *    больше не бывает;
+ *  - любое монтирование обёрнуто в try/catch, а после нескольких подряд
+ *    ошибок инъекция сама отключается на сессию и пишет диагностику, вместо
+ *    того чтобы молотить по хосту.
  */
 
 import { getReactInstance } from 'millennium';
 
 import { api } from './lib/rpc';
-import { LibraryDock } from './ui/LibraryDock';
+import { onRoute, rescanFromDom, startRouteTracking } from './lib/route';
+import { ConsentCard } from './ui/ConsentBanner';
+import { ensureDock, removeDock } from './ui/dock';
 import { VersionPanel } from './ui/VersionPanel';
 
 const MARKERS = [
@@ -27,6 +32,7 @@ const MARKERS = [
 	'Versions privées',
 	'Private Versionen',
 	'Versteckte Versionen',
+	'Verisiones privadas',
 	'Versiones privadas',
 	'Versioni private',
 	'Wersje prywatne',
@@ -34,39 +40,46 @@ const MARKERS = [
 ];
 
 const HOST_ID = 'version-rollback-betas-host';
-const POLL_MS = 800;
-
-/**
- * Идентификаторы своих узлов, чтобы не монтировать одно и то же дважды.
- */
-const BANNER_ID = 'version-rollback-library-dock';
+const CONSENT_ID = 'version-rollback-consent-card';
 const SETTINGS_ROOT_ID = 'version-rollback-settings-root';
+const DEBOUNCE_MS = 400;
+/** Сколько подряд ошибок инъекции терпим, прежде чем отключиться на сессию. */
+const MAX_STRIKES = 5;
 
-const log = (message: string, extra?: unknown) =>
-	console.info(`[Version Rollback] ${message}`, extra ?? '');
+type ReactDom = {
+	createRoot?: (el: Element) => { render: (node: unknown) => void; unmount: () => void } | null;
+	render?: (node: unknown, el: Element) => void;
+	unmountComponentAtNode?: (el: Element) => void;
+};
 
-/** Диагностика в файл: консоль Steam UI не всегда доступна, а файл — да. */
+const reactDom = (): ReactDom | undefined => (globalThis as unknown as { SP_REACTDOM?: ReactDom }).SP_REACTDOM;
+
+const log = (message: string, extra?: unknown) => console.info(`[Version Rollback] ${message}`, extra ?? '');
+
 const note = (message: string) => {
 	api.debugNote(message).catch((): void => undefined);
 };
 
-const isVisible = (el: HTMLElement): boolean => {
-	const rect = el.getBoundingClientRect();
-	return rect.width > 0 && rect.height > 0;
-};
+/* ------------------------------------------------------------------ */
+/* Поиск маркера страницы «Версии и бета-версии» без layout-треша.     */
+/* ------------------------------------------------------------------ */
 
-/** Заголовок «Скрытые версии» — единственный надёжный текстовый якорь на странице. */
 const findMarker = (): HTMLElement | null => {
-	const nodes = document.querySelectorAll<HTMLElement>('div, span, h2, h3');
-	for (const el of Array.from(nodes)) {
-		if (el.children.length > 0) continue;
-		const text = el.textContent?.trim();
-		if (text && MARKERS.includes(text) && isVisible(el)) return el;
+	if (!document.body) return null;
+	const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+	let node: Node | null = walker.nextNode();
+	while (node) {
+		const text = (node.nodeValue ?? '').trim();
+		if (text && text.length < 40 && MARKERS.includes(text)) {
+			const parent = node.parentElement;
+			if (parent && parent.children.length === 0) return parent;
+		}
+		node = walker.nextNode();
 	}
 	return null;
 };
 
-/** AppID из React-пропсов ближайших родителей: у страницы свойств он где-то рядом. */
+/** AppID из React-пропсов ближайших родителей: у страницы свойств он рядом. */
 const findAppId = (from: HTMLElement): string | undefined => {
 	try {
 		let fiber = getReactInstance(from) as any;
@@ -85,6 +98,20 @@ const findAppId = (from: HTMLElement): string | undefined => {
 	return undefined;
 };
 
+/** Запасной способ узнать appid страницы игры: React-пропсы её контейнера. */
+const findLibraryAppId = (): string | undefined => {
+	try {
+		const anchor =
+			document.querySelector<HTMLElement>('[class*="appdetailsoverview"]') ??
+			document.querySelector<HTMLElement>('[class*="libraryappdetails"]') ??
+			document.querySelector<HTMLElement>('[class*="appdetailsgamepad"]');
+		if (!anchor) return undefined;
+		return findAppId(anchor);
+	} catch {
+		return undefined;
+	}
+};
+
 /** Контейнер страницы: поднимаемся от заголовка, пока не найдём блок с полем ввода кода. */
 const findPageContainer = (marker: HTMLElement): HTMLElement | null => {
 	let node: HTMLElement | null = marker.parentElement;
@@ -95,162 +122,241 @@ const findPageContainer = (marker: HTMLElement): HTMLElement | null => {
 	return marker.parentElement;
 };
 
-export const startBetasSection = (): void => {
-	const reactDom = (globalThis as unknown as { SP_REACTDOM?: any }).SP_REACTDOM;
-	if (!reactDom || (!reactDom.createRoot && !reactDom.render)) {
-		log('SP_REACTDOM недоступен — секция в свойствах не будет вставлена', typeof reactDom);
-		note('no reactdom: ' + typeof reactDom);
+/* ------------------------------------------------------------------ */
+/* Состояние инъекции.                                                 */
+/* ------------------------------------------------------------------ */
+
+let betasRoot: { unmount: () => void } | null = null;
+let betasHost: HTMLElement | null = null;
+let consentRoot: { unmount: () => void } | null = null;
+let observer: MutationObserver | null = null;
+let debounceTimer: number | null = null;
+let strikes = 0;
+let stopped = false;
+
+let consentCache: { consent: string; asked: boolean } | null = null;
+const knownCache = new Map<string, boolean>();
+let consentAppId: string | undefined;
+
+const unmountBetas = (): void => {
+	try {
+		betasRoot?.unmount();
+	} catch (error) {
+		log('ошибка при снятии секции', String(error));
+	}
+	betasRoot = null;
+	betasHost?.remove();
+	betasHost = null;
+};
+
+const unmountConsent = (): void => {
+	try {
+		consentRoot?.unmount();
+	} catch {
+		/* уже снят */
+	}
+	consentRoot = null;
+	document.getElementById(CONSENT_ID)?.remove();
+};
+
+const mountBetas = (marker: HTMLElement): void => {
+	const dom = reactDom();
+	if (!dom?.createRoot && !dom?.render) {
+		note('no reactdom: ' + typeof dom);
 		return;
 	}
-	let root: { unmount: () => void } | null = null;
-	let host: HTMLElement | null = null;
-	let reportedNoMarker = false;
+	const container = findPageContainer(marker);
+	if (!container) return;
 
-	note('inject start, reactDom=' + typeof reactDom);
+	betasHost = document.createElement('div');
+	betasHost.id = HOST_ID;
+	betasHost.style.margin = '12px 0 4px';
+	betasHost.textContent = 'Version Rollback: загрузка панели…';
+	container.appendChild(betasHost);
 
-	const unmount = () => {
-		try {
-			root?.unmount();
-		} catch (error) {
-			log('ошибка при снятии секции', String(error));
+	const appid = findAppId(marker);
+	const element = <VersionPanel appidHint={appid} context="library" />;
+	try {
+		if (dom.createRoot) {
+			const root = dom.createRoot(betasHost);
+			if (!root) throw new Error('createRoot вернул null');
+			root.render(element);
+			betasRoot = root;
+		} else {
+			dom.render?.(element, betasHost);
+			betasRoot = { unmount: () => dom.unmountComponentAtNode?.(betasHost as HTMLElement) };
 		}
-		root = null;
-		host = null;
-	};
+		log('секция вставлена в «Версии и бета-версии»', { appid: appid ?? '(не определён)' });
+	} catch (error) {
+		log('не удалось смонтировать секцию', String(error));
+		if (betasHost) betasHost.textContent = 'Version Rollback: не удалось показать панель — ' + String(error);
+		betasRoot = null;
+	}
+};
 
-	const tick = () => {
-		const marker = findMarker();
+/* ------------------------------------------------------------------ */
+/* Согласие на сбор: один вопрос за всё время.                         */
+/* ------------------------------------------------------------------ */
 
-		if (!marker) {
-			if (host && !document.contains(host)) unmount();
-			if (!reportedNoMarker) {
-				reportedNoMarker = true;
-				const hasText = (document.body?.innerText ?? '').includes('Скрытые версии');
-				note('no marker; text present=' + hasText);
-			}
-			return;
-		}
-
-		if (host && document.contains(host)) return; // уже стоит на месте
-		if (host) unmount(); // React выкинул наш узел — монтируем заново
-
-		const container = findPageContainer(marker);
-		if (!container) {
-			log('не нашёл контейнер страницы версий');
-			return;
-		}
-
-		host = document.createElement('div');
-		host.id = HOST_ID;
-		host.style.margin = '12px 0 4px';
-		// Текст до рендера: если React упадёт, пользователь увидит хотя бы это,
-		// а не пустое место.
-		host.textContent = 'Version Rollback: загрузка панели…';
-		container.appendChild(host);
-
-		const appid = findAppId(marker);
-		const element = <VersionPanel appidHint={appid} context="library" />;
-
-		try {
-			if (reactDom.createRoot) {
-				const created = reactDom.createRoot(host);
-				created.render(element);
-				root = created;
-			} else {
-				reactDom.render(element, host);
-				root = { unmount: () => reactDom.unmountComponentAtNode(host) };
-			}
-			reportedNoMarker = false;
-			try {
-				localStorage.setItem('vrb-mounted', String(appid ?? 'none') + ' ' + new Date().toISOString());
-			} catch {
-				/* игнорируем */
-			}
-			log('секция вставлена в «Версии и бета-версии»', { appid: appid ?? '(не определён)' });
-			note('mounted appid=' + (appid ?? 'none'));
-		} catch (error) {
-			log('не удалось смонтировать секцию', String(error));
-			note('mount error: ' + String(error));
-			if (host) host.textContent = 'Version Rollback: не удалось показать панель — ' + String(error);
-		}
-	};
-
-	setInterval(tick, POLL_MS);
-	tick();
+const showConsentCard = (appid: string): void => {
+	if (document.getElementById(CONSENT_ID)) return;
+	const dom = reactDom();
+	if (!dom?.createRoot) {
+		// Без React вопрос можно задать в настройках плагина — не падаем.
+		note('consent card skipped: no reactdom');
+		return;
+	}
+	const host = document.createElement('div');
+	host.id = CONSENT_ID;
+	host.style.cssText = 'position:fixed;right:24px;bottom:84px;z-index:2147483647;';
+	document.body.appendChild(host);
+	try {
+		const root = dom.createRoot(host);
+		if (!root) throw new Error('createRoot вернул null');
+		root.render(
+			<ConsentCard
+				appid={appid}
+				onDone={() => {
+					consentCache = null;
+					window.setTimeout(() => unmountConsent(), 12000);
+				}}
+			/>,
+		);
+		consentRoot = root;
+		note('consent card shown for ' + appid);
+	} catch (error) {
+		log('не удалось показать карточку согласия', String(error));
+		host.remove();
+	}
 };
 
 /**
- * Кнопка-панель Version Rollback в разделе «Библиотека».
- *
- * Монтируется поверх страницы библиотеки (правый нижний угол). В настройках
- * плагина панели нет: решение о версии принимается там, где видны игры.
+ * Точка входа вопроса: игра, которой нет в общей базе версий.
+ * Спрашиваем ровно один раз: ответ хранится в настройках Millennium
+ * (collect_consent + consent_shown_for=scope-1).
  */
-export const startLibraryDock = (): void => {
-	const reactDom = (globalThis as unknown as { SP_REACTDOM?: any }).SP_REACTDOM;
-	if (!reactDom || (!reactDom.createRoot && !reactDom.render)) {
-		log('SP_REACTDOM недоступен — баннер согласия не появится', typeof reactDom);
-		return;
-	}
+const maybeAskConsent = (appid: string | undefined): void => {
+	if (!appid || consentAppId === appid || document.getElementById(CONSENT_ID)) return;
+	consentAppId = appid;
 
-	let root: { unmount: () => void } | null = null;
-	let host: HTMLElement | null = null;
-
-	const unmount = () => {
-		const element = host;
+	void (async () => {
 		try {
-			root?.unmount();
+			if (!consentCache) {
+				const state = await api.getConsent();
+				consentCache = { consent: String(state?.consent ?? ''), asked: Boolean(state?.asked) };
+			}
+			if (consentCache.asked) return; // уже отвечали — не переспрашиваем
+			if (knownCache.has(appid)) return;
+			const known = await api.appKnown(appid);
+			knownCache.set(appid, Boolean(known?.known));
+			if (known?.known) return; // игра уже в базе — собирать нечего
+			showConsentCard(appid);
 		} catch (error) {
-			log('ошибка при снятии баннера', String(error));
+			// Бэкенд недоступен — не показываем карточку, попробуем на другой игре.
+			consentAppId = undefined;
+			log('проверка согласия отложена', String(error));
 		}
-		try {
-			element?.remove();
-		} catch {
-			/* игнорируем */
-		}
-		root = null;
-		host = null;
-	};
+	})();
+};
 
-	const isLibraryPage = (): boolean => {
-		// настройки плагина открыты — панель там не нужна
-		if (document.getElementById(SETTINGS_ROOT_ID)) return false;
-		// маркеры библиотеки — подсказка, а не обязательное условие: вёрстка Steam
-		// меняется от версии к версии. Если ни один не найден, всё равно показываем
-		// кнопку: маленькая плашка в углу не мешает и в магазине.
-		return true;
-	};
+window.addEventListener('vrb-consent-changed', () => {
+	consentCache = null;
+	consentAppId = undefined;
+});
 
-	const tick = () => {
-		if (!isLibraryPage()) {
-			if (host) unmount();
+/* ------------------------------------------------------------------ */
+/* Главный цикл реакции на DOM.                                        */
+/* ------------------------------------------------------------------ */
+
+const refresh = (): void => {
+	if (stopped) return;
+	try {
+		if (!document.body) return;
+
+		// Открыты настройки плагина — там свой UI, инъекции не нужны.
+		if (document.getElementById(SETTINGS_ROOT_ID)) {
+			removeDock();
+			unmountBetas();
+			unmountConsent();
 			return;
 		}
-		if (host && document.contains(host)) return;
-		if (host) unmount();
 
-		host = document.createElement('div');
-		host.id = BANNER_ID;
-		host.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:2147483647;';
-		document.body.appendChild(host);
+		ensureDock();
 
-		const element = <LibraryDock />;
-		try {
-			if (reactDom.createRoot) {
-				const created = reactDom.createRoot(host);
-				created.render(element);
-				root = created;
-			} else {
-				reactDom.render(element, host);
-				root = { unmount: () => reactDom.unmountComponentAtNode(host) };
+		// Секция «Версии и бета-версии» в свойствах игры.
+		const marker = findMarker();
+		if (marker) {
+			if (!betasHost || !document.contains(betasHost)) {
+				unmountBetas();
+				mountBetas(marker);
 			}
-			note('library dock mounted');
-			log('панель Version Rollback показана в библиотеке');
-		} catch (error) {
-			log('не удалось показать баннер согласия', String(error));
-			note('banner error: ' + String(error));
+		} else if (betasHost) {
+			unmountBetas();
 		}
-	};
 
-	setInterval(tick, POLL_MS);
-	tick();
+		// Согласие: appid берём из навигации, затем из DOM-сигналов.
+		const domAppId = marker ? findAppId(marker) : findLibraryAppId();
+		rescanFromDom(domAppId, Boolean(marker));
+		maybeAskConsent(domAppId ?? undefined);
+
+		strikes = 0;
+	} catch (error) {
+		strikes += 1;
+		console.error('[Version Rollback] ошибка инъекции:', error);
+		if (strikes >= MAX_STRIKES) {
+			stopped = true;
+			observer?.disconnect();
+			observer = null;
+			unmountConsent();
+			note('injection disabled after ' + String(MAX_STRIKES) + ' strikes: ' + String(error).slice(0, 200));
+		}
+	}
+};
+
+const scheduleRefresh = (): void => {
+	if (stopped) return;
+	if (debounceTimer !== null) window.clearTimeout(debounceTimer);
+	debounceTimer = window.setTimeout(() => {
+		debounceTimer = null;
+		refresh();
+	}, DEBOUNCE_MS);
+};
+
+/** Единственная точка входа инъекций. Вызывается из index.tsx один раз. */
+export const startUi = (): void => {
+	if (observer || stopped) return;
+	startRouteTracking();
+	onRoute((route) => {
+		if (route.appid) maybeAskConsent(route.appid);
+		scheduleRefresh();
+	});
+
+	if (typeof MutationObserver !== 'undefined' && document.body) {
+		observer = new MutationObserver(scheduleRefresh);
+		observer.observe(document.body, { childList: true, subtree: true });
+	}
+
+	// Первая отрисовка Steam может запаздывать: две разовые попытки, не интервал.
+	window.setTimeout(scheduleRefresh, 1500);
+	window.setTimeout(scheduleRefresh, 6000);
+	note('inject start (observer mode)');
+};
+
+/** Полная остановка: выгрузка плагина / перезапуск UI. */
+export const stopUi = (): void => {
+	stopped = true;
+	observer?.disconnect();
+	observer = null;
+	if (debounceTimer !== null) window.clearTimeout(debounceTimer);
+	debounceTimer = null;
+	unmountBetas();
+	unmountConsent();
+	removeDock();
+};
+
+/** Для настроек плагина: сбросить кэш согласия, чтобы карточка перечиталась. */
+export const invalidateConsentCache = (): void => {
+	consentCache = null;
+	consentAppId = undefined;
+	window.dispatchEvent(new Event('vrb-consent-changed'));
 };

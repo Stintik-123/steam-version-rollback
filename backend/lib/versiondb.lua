@@ -92,6 +92,14 @@ function versiondb.save_user(db)
 	return util.write_json_file(versiondb.user_path(), normalized)
 end
 
+-- после записи локальной копии кэш неактуален
+local _save_user_raw = versiondb.save_user
+function versiondb.save_user(db)
+	local ok = _save_user_raw(db)
+	versiondb.invalidate()
+	return ok
+end
+
 --- Слить две базы: вторая дополняет первую (по сборкам и манифестам).
 --- Чистая функция — покрыта тестом.
 function versiondb.merge(base, extra)
@@ -143,6 +151,31 @@ end
 function versiondb.load()
 	local db = versiondb.packaged() or empty_db()
 	return versiondb.merge(db, versiondb.user() or {})
+end
+
+--- Кэш загруженной базы на ttl секунд: RPC app_known вызывается при каждом
+--- входе на страницу игры, перечитывать файлы каждый раз wasteful и медленно.
+local cache = { db = nil, at = 0 }
+
+function versiondb.invalidate()
+	cache.db = nil
+	cache.at = 0
+end
+
+function versiondb.cached(ttl)
+	ttl = ttl or 60
+	local now = util.now()
+	if cache.db == nil or now - cache.at > ttl then
+		local ok, db = pcall(versiondb.load)
+		if ok and type(db) == "table" then
+			cache.db = db
+			cache.at = now
+		elseif cache.db == nil then
+			cache.db = empty_db()
+			cache.at = now
+		end
+	end
+	return cache.db
 end
 
 --- Сборки приложения из базы: [{ buildid, ts, branch, depots, source = "db" }]

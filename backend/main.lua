@@ -324,6 +324,63 @@ function util.encode_json(tbl)
 	return encoded
 end
 
+--- Жёсткий потолок размера ответа RPC.
+---
+--- Ответ бэкенда идёт во фронтенд через IPC Lua-хоста Millennium. Ответ
+--- неограниченного размера (вся база версий, весь лог, сотни сборок) — это
+--- переполнение буфера в нативном слое и падение хоста с 0xC0000409.
+--- Поэтому: (1) списки режутся У источника, (2) здесь — страховка: если
+--- строка всё же превысила лимит, вместо неё уходит понятная заглушка,
+--- а не мегабайты в IPC.
+util.RPC_MAX_BYTES = 65536
+
+function util.cap_string(text, limit)
+	limit = limit or util.RPC_MAX_BYTES
+	if type(text) ~= "string" then
+		return text, false
+	end
+	if #text <= limit then
+		return text, false
+	end
+	return text:sub(1, limit), true
+end
+
+--- encode_json с предохранителем: превысили лимит — отдаём валидный JSON
+--- с пометкой truncated, вместо того чтобы ронять хост огромной строкой.
+function util.encode_json_capped(tbl, limit)
+	local encoded = util.encode_json(tbl)
+	local capped, truncated = util.cap_string(encoded, limit)
+	if not truncated then
+		return encoded
+	end
+	util.err("ответ RPC превысил " .. tostring(limit) .. " байт — отправлена заглушка")
+	return util.encode_json({
+		ok = false,
+		truncated = true,
+		error = "ответ слишком большой для IPC; сузьте запрос (меньше сборок/записей)",
+	})
+end
+
+--- Обрезать список сверху, сохранив пометку о обрезке.
+function util.cap_list(list, limit)
+	limit = limit or 100
+	if type(list) ~= "table" then
+		return list, false
+	end
+	local n = 0
+	for _ in pairs(list) do
+		n = n + 1
+	end
+	if n <= limit then
+		return list, false
+	end
+	local out = {}
+	for i = 1, limit do
+		out[i] = list[i]
+	end
+	return out, true
+end
+
 function util.read_file(path)
 	if not fs.exists(path) then
 		return nil
@@ -1531,6 +1588,14 @@ function versiondb.save_user(db)
 	return util.write_json_file(versiondb.user_path(), normalized)
 end
 
+-- после записи локальной копии кэш неактуален
+local _save_user_raw = versiondb.save_user
+function versiondb.save_user(db)
+	local ok = _save_user_raw(db)
+	versiondb.invalidate()
+	return ok
+end
+
 --- Слить две базы: вторая дополняет первую (по сборкам и манифестам).
 --- Чистая функция — покрыта тестом.
 function versiondb.merge(base, extra)
@@ -1582,6 +1647,31 @@ end
 function versiondb.load()
 	local db = versiondb.packaged() or empty_db()
 	return versiondb.merge(db, versiondb.user() or {})
+end
+
+--- Кэш загруженной базы на ttl секунд: RPC app_known вызывается при каждом
+--- входе на страницу игры, перечитывать файлы каждый раз wasteful и медленно.
+local cache = { db = nil, at = 0 }
+
+function versiondb.invalidate()
+	cache.db = nil
+	cache.at = 0
+end
+
+function versiondb.cached(ttl)
+	ttl = ttl or 60
+	local now = util.now()
+	if cache.db == nil or now - cache.at > ttl then
+		local ok, db = pcall(versiondb.load)
+		if ok and type(db) == "table" then
+			cache.db = db
+			cache.at = now
+		elseif cache.db == nil then
+			cache.db = empty_db()
+			cache.at = now
+		end
+	end
+	return cache.db
 end
 
 --- Сборки приложения из базы: [{ buildid, ts, branch, depots, source = "db" }]
@@ -1868,9 +1958,13 @@ function collector.collect_all(force)
 	return summary
 end
 
---- Тело отчёта для GitHub Issue: то, что собрано на этой машине (локальная база).
+--- Отчёт для GitHub Issue: то, что собрано на этой машине (локальная база).
+--- Без аргумента — по всем играм локальной базы, с appid — только по одной
+--- игре (карточка согласия и ручной сбор в настройках).
+--- @param appid_filter string|nil
 --- @return string body, table stats
-function collector.report()
+function collector.report(appid_filter)
+	local filter = appid_filter and tostring(appid_filter) or nil
 	local db = versiondb.user() or { apps = {} }
 	local body, stats = {}, { apps = 0, builds = 0, manifests = 0 }
 	body[#body + 1] = "Сбор метаданных о версиях Steam (только depotid → manifest GID, без ключей депо)."
@@ -1880,57 +1974,66 @@ function collector.report()
 	body[#body + 1] = ""
 
 	for appid, app in pairs(db.apps or {}) do
-		local builds, manifests = {}, {}
-		for buildid, build in pairs(app.builds or {}) do
-			local depots = {}
-			local count = 0
-			for depotid, gid in pairs(build.depots or {}) do
-				depots[#depots + 1] = { depotid = depotid, gid = gid }
-				count = count + 1
+		if filter == nil or tostring(appid) == filter then
+			local builds, manifests = {}, {}
+			for buildid, build in pairs(app.builds or {}) do
+				local depots = {}
+				local count = 0
+				for depotid, gid in pairs(build.depots or {}) do
+					depots[#depots + 1] = { depotid = depotid, gid = gid }
+					count = count + 1
+				end
+				if count > 0 then
+					table.sort(depots, function(a, b)
+						return (tonumber(a.depotid) or 0) < (tonumber(b.depotid) or 0)
+					end)
+					builds[#builds + 1] = {
+						buildid = buildid,
+						branch = build.branch or "public",
+						ts = tonumber(build.ts) or 0,
+						depots = depots,
+					}
+				end
 			end
-			if count > 0 then
-				table.sort(depots, function(a, b)
-					return (tonumber(a.depotid) or 0) < (tonumber(b.depotid) or 0)
+			for _, manifest in pairs(app.manifests or {}) do
+				manifests[#manifests + 1] = manifest
+			end
+			if #builds > 0 or #manifests > 0 then
+				stats.apps = stats.apps + 1
+				table.sort(builds, function(a, b)
+					if a.ts ~= b.ts then
+						return a.ts > b.ts
+					end
+					return tostring(a.buildid) > tostring(b.buildid)
 				end)
-				builds[#builds + 1] = {
-					buildid = buildid,
-					branch = build.branch or "public",
-					ts = tonumber(build.ts) or 0,
-					depots = depots,
-				}
+				table.sort(manifests, function(a, b)
+					if tostring(a.depotid) ~= tostring(b.depotid) then
+						return (tonumber(a.depotid) or 0) < (tonumber(b.depotid) or 0)
+					end
+					return tostring(a.gid) < tostring(b.gid)
+				end)
+				body[#body + 1] = "### " .. tostring(app.name or ("App " .. tostring(appid))) .. " (" .. tostring(appid) .. ")"
+				for _, build in ipairs(builds) do
+					local parts = {}
+					for _, depot in ipairs(build.depots) do
+						parts[#parts + 1] = depot.depotid .. "=" .. depot.gid
+					end
+					local date = build.ts > 0 and util.date_utc(build.ts) or "?"
+					body[#body + 1] = string.format(
+						"- build %s · %s · %s · %s",
+						tostring(build.buildid), tostring(build.branch), date, table.concat(parts, " ")
+					)
+					stats.builds = stats.builds + 1
+				end
+				stats.manifests = stats.manifests + #manifests
+				for _, manifest in ipairs(manifests) do
+					body[#body + 1] = string.format(
+						"- manifest %s → %s (локальный кэш)",
+						tostring(manifest.depotid), tostring(manifest.gid)
+					)
+				end
+				body[#body + 1] = ""
 			end
-		end
-		for key, manifest in pairs(app.manifests or {}) do
-			manifests[#manifests + 1] = manifest
-		end
-		if #builds > 0 or #manifests > 0 then
-			stats.apps = stats.apps + 1
-			table.sort(builds, function(a, b)
-				if a.ts ~= b.ts then
-					return a.ts > b.ts
-				end
-				return tostring(a.buildid) > tostring(b.buildid)
-			end)
-			table.sort(manifests, function(a, b)
-				if tostring(a.depotid) ~= tostring(b.depotid) then
-					return (tonumber(a.depotid) or 0) < (tonumber(b.depotid) or 0)
-				end
-				return tostring(a.gid) < tostring(b.gid)
-			end)
-			body[#body + 1] = "### " .. tostring(app.name or ("App " .. tostring(appid))) .. " (" .. tostring(appid) .. ")"
-			for _, build in ipairs(builds) do
-				local parts = {}
-				for _, depot in ipairs(build.depots) do
-					parts[#parts + 1] = depot.depotid .. "=" .. depot.gid
-				end
-				local date = build.ts > 0 and util.date_utc(build.ts) or "?"
-				body[#body + 1] = string.format(
-					"- build %s · %s · %s · %s",
-					tostring(build.buildid), tostring(build.branch), date, table.concat(parts, " ")
-				)
-				stats.builds = stats.builds + 1
-			end
-			body[#body + 1] = ""
 		end
 	end
 
@@ -2779,9 +2882,15 @@ local function json_call(fn)
 		return util.encode_json({ ok = false, error = tostring(res) })
 	end
 	if type(res) == "string" then
-		return res
+		-- строки приходят уже готовым JSON: режем и их, если вдруг огромные
+		local capped, truncated = util.cap_string(res)
+		if truncated then
+			util.err("RPC: строковый ответ превысил лимит IPC — отправлена заглушка")
+			return util.encode_json({ ok = false, truncated = true, error = "ответ слишком большой для IPC" })
+		end
+		return capped
 	end
-	return util.encode_json(res or { ok = true })
+	return util.encode_json_capped(res or { ok = true })
 end
 
 local function cfg_get(key, default)
@@ -2969,7 +3078,8 @@ function debug_note(text)
 	return json_call(function()
 		local dir = util.data_dir()
 		local path = require("fs").join(dir, "frontend-debug.txt")
-		local ok = require("utils").append_file(path, tostring(util.now()) .. " " .. tostring(text) .. "\n")
+		local line = util.cap_string(tostring(text), 400)
+		local ok = require("utils").append_file(path, tostring(util.now()) .. " " .. line .. "\n")
 		return { ok = ok ~= nil, path = path }
 	end)
 end
@@ -3037,6 +3147,9 @@ function get_versions(appid, branch, force)
 		for _, buildid in ipairs(order) do
 			out[#out + 1] = merged[buildid]
 		end
+		-- IPC-потолок: сотни сборок в одном ответе роняли хост в 0.5.x
+		local capped_out, truncated_list = util.cap_list(out, 120)
+		out = capped_out
 		table.sort(out, function(a, b2)
 			if (a.ts or 0) ~= (b2.ts or 0) then
 				return (a.ts or 0) > (b2.ts or 0)
@@ -3050,9 +3163,127 @@ function get_versions(appid, branch, force)
 			app_name = info.name,
 			branch = b,
 			versions = out,
+			truncated = truncated_list or nil,
 			db = versiondb.summary(db, id),
 			warning = (not versions) and verr or nil,
 		}
+	end)
+end
+
+--- Состояние согласия на сбор: yes / no / "" и факт, что вопрос уже задавали.
+---@ffi
+---@return string JSON { consent, asked, shown_for, github_token_set }
+function get_consent()
+	return json_call(function()
+		local consent = consent_state()
+		local shown = tostring(cfg_get("consent_shown_for", ""))
+		return {
+			ok = true,
+			consent = consent,
+			asked = (consent ~= "") or (shown ~= ""),
+			shown_for = shown,
+			github_token_set = (cfg_get("github_token", "") ~= ""),
+		}
+	end)
+end
+
+--- Зафиксировать ответ пользователя на вопрос о сборе.
+---@ffi
+---@param value string "yes" | "no"
+---@return string JSON
+function set_consent(value)
+	return json_call(function()
+		local v = tostring(value)
+		if v ~= "yes" and v ~= "no" then
+			return { ok = false, error = "ожидается yes или no" }
+		end
+		pcall(millennium.config.set, "collect_consent", v)
+		pcall(millennium.config.set, "consent_shown_for", "scope-1")
+		util.log("согласие на сбор: " .. v)
+		return { ok = true, consent = v }
+	end)
+end
+
+--- Есть ли игра в общей базе версий. Дёшево: без сети, кэш базы на 60 с.
+---@ffi
+---@param appid string
+---@return string JSON { known, in_db, builds, manifests }
+function app_known(appid)
+	return json_call(function()
+		local id = util.norm_id(appid)
+		if not id then
+			return { ok = false, error = "некорректный AppID" }
+		end
+		local summary = versiondb.summary(versiondb.cached(60), id)
+		return {
+			ok = true,
+			appid = id,
+			known = summary.in_db == true,
+			in_db = summary.in_db,
+			builds = summary.builds or 0,
+			manifests = summary.manifests or 0,
+		}
+	end)
+end
+
+--- Сбор по одной игре + оформление Issue: с токеном создаётся автоматически,
+--- без токена возвращаем предзаполненную ссылку (отправляет пользователь).
+---@ffi
+---@param appid string
+---@return string JSON { number?, url?, truncated?, stats? }
+function submit_app_issue(appid)
+	return json_call(function()
+		if not local_collect_allowed() then
+			return { ok = false, error = "сбор не разрешён: сначала ответьте на вопрос в библиотеке" }
+		end
+		local id = util.norm_id(appid)
+		if not id then
+			return { ok = false, error = "некорректный AppID" }
+		end
+		-- убедимся, что по игре что-то собрано (локально, без принудительной сети)
+		local db = versiondb.user() or { version = versiondb.VERSION, updated = 0, apps = {} }
+		local row = collector.collect_app(db, id, false)
+		versiondb.save_user(db)
+
+		local body, stats = collector.report(id)
+		if stats.apps == 0 then
+			return { ok = false, error = "по игре пока нет метаданных: локальные кэши Steam пусты, повторите после установки/запуска игры" }
+		end
+		local title = string.format("Версия %s: %s сборок, %s манифестов (локальный сбор)", id, tostring(stats.builds), tostring(stats.manifests))
+		local token = tostring(cfg_get("github_token", ""))
+		if token ~= "" then
+			local payload = util.encode_json({ title = title, body = body, labels = { "version-data" } })
+			local headers = {
+				["Authorization"] = "Bearer " .. token,
+				["Accept"] = "application/vnd.github+json",
+				["Content-Type"] = "application/json",
+				["User-Agent"] = "VersionRollback/0.6 (Millennium plugin)",
+			}
+			local ok, res = pcall(function()
+				if http.post then
+					return http.post("https://api.github.com/repos/" .. collector.REPO .. "/issues", {
+						headers = headers,
+						body = payload,
+						timeout = 25,
+					})
+				end
+				return http.request("https://api.github.com/repos/" .. collector.REPO .. "/issues", {
+					method = "POST",
+					headers = headers,
+					body = payload,
+					timeout = 25,
+				})
+			end)
+			if ok and res and (res.status == 201 or res.status == 200) then
+				local decoded = util.decode_json(res.body or "")
+				util.log("Issue создан: " .. tostring(decoded and decoded.html_url))
+				return { ok = true, number = decoded and decoded.number, url = decoded and decoded.html_url, stats = stats, auto = true }
+			end
+			util.warn("GitHub API не принял Issue: " .. tostring(res and res.status))
+			-- падаем в ссылочный путь: пользователь отправит сам
+		end
+		local url, truncated = collector.issue_url(body, title)
+		return { ok = true, url = url, truncated = truncated, stats = stats, auto = false, errors = row.errors }
 	end)
 end
 
@@ -3390,6 +3621,7 @@ function get_collection_report()
 			return { ok = false, error = "сбор не разрешён" }
 		end
 		local body, stats = collector.report()
+		body = util.cap_string(body, 50000)
 		local url, truncated = collector.issue_url(body, "Сбор версий Steam: " .. tostring(stats.apps) .. " игр")
 		return {
 			ok = true,
@@ -3686,7 +3918,11 @@ end
 ---@return string JSON
 function get_log()
 	return json_call(function()
-		return { ok = true, log = util.log_tail(120) }
+		local rows = util.log_tail(80)
+		for _, row in ipairs(rows) do
+			row.msg = util.cap_string(tostring(row.msg), 240)
+		end
+		return { ok = true, log = rows }
 	end)
 end
 

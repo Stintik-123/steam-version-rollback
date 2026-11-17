@@ -1,68 +1,26 @@
 /**
- * Version Rollback — точка входа фронтенда (starlight/millennium.toml).
- *
- * Здесь регистрация плагина, FFI-функция для Lua-бэкенда и запуск вставки
- * секции в штатную страницу «Версии и бета-версии» (см. ./inject.tsx).
+ * Version Rollback — точка входа фронтенда (starlight / millennium.toml).
  *
  * Правила starlight, которые важно не нарушать:
  *   - `definePlugin` возвращает { title, icon, content }, icon обязателен;
  *   - функции, вызываемые из Lua через millennium.call_frontend_method,
- *     помечаются `/** @ffi *\/` и экспортируются именно из этого файла;
+ *     помечаются `/** @ffi *\\/` и экспортируются именно из этого файла;
  *   - у параметров @ffi-функций должен быть явный тип.
+ *
+ * Правила стабильности (после краха 0xC0000409 в 0.5.x):
+ *   - при загрузке бандла НЕ делается ничего, кроме регистрации плагина и
+ *     отложенного старта инъекций (inject.tsx) — никаких интервалов и RPC
+ *     в момент старта Steam;
+ *   - все RPC идут последовательной очередью с таймаутами (lib/rpc.ts);
+ *   - любая ошибка инъекции ловится локально и не может уронить ни окно
+ *     Steam, ни Lua-хост.
  */
 
 import { definePlugin } from 'millennium';
 
-import { startBetasSection } from './inject';
+import { startUi, stopUi } from './inject';
 import { api } from './lib/rpc';
-import { mountDock } from './ui/dock';
-
-/** Диагностика: одна метка на запуск, чтобы было видно, что бандл исполнился. */
-try {
-	localStorage.setItem('vrb-diag', 'boot ' + new Date().toISOString());
-	const w = globalThis as unknown as Record<string, unknown>;
-	const keys = Object.keys(w).filter((key) => /backend|ffi|millennium/i.test(key));
-	localStorage.setItem(
-		'vrb-env',
-		JSON.stringify({
-			backend: typeof w.backend,
-			ffi: typeof w.MILLENNIUM_PRIVATE_INTERNAL_FOREIGN_FUNCTION_INTERFACE_DO_NOT_USE,
-			keys,
-		}),
-	);
-} catch {
-	/* игнорируем */
-}
-
-/**
- * Проба RPC: повторяем, пока бэкенд не ответит. Результат — в localStorage
- * 'vrb-probe' (читается снаружи из LevelDB).
- */
-const probeBackendCalls = async (): Promise<void> => {
-	try {
-		const result = await api.ping();
-		try {
-			localStorage.setItem('vrb-probe', 'ok ' + JSON.stringify(result).slice(0, 200));
-		} catch {
-			/* игнорируем */
-		}
-		return;
-	} catch (error) {
-		try {
-			localStorage.setItem('vrb-probe', 'fail ' + String(error).slice(0, 200));
-		} catch {
-			/* игнорируем */
-		}
-	}
-};
-
-let probeAttempt = 0;
-const probeTimer = window.setInterval((): void => {
-	probeAttempt += 1;
-	void probeBackendCalls();
-	if (probeAttempt >= 8) window.clearInterval(probeTimer);
-}, 15000);
-window.setTimeout((): void => void probeBackendCalls(), 5000);
+import { SettingsPanel } from './ui/SettingsPanel';
 
 type SteamConsole = {
 	Console?: { ExecCommand?: (command: string) => void; ExecuteCommand?: (command: string) => void };
@@ -100,69 +58,62 @@ const Icon = () => (
 	</svg>
 );
 
-const g = globalThis as unknown as { SP_REACTDOM?: unknown };
-console.error('[VRTEST] bundle loaded, reactDom=' + typeof g.SP_REACTDOM);
+export default definePlugin(() => ({
+	title: 'Version Rollback',
+	icon: <Icon />,
+	content: (
+		<div id="version-rollback-settings-root" style={{ padding: '8px 0' }}>
+			<SettingsPanel />
+		</div>
+	),
+}));
 
-/**
- * Самопроверка связи с Lua-бэкендом: пишет в консоль Steam UI одну строку,
- * по которой видно, работает ли RPC. Полезно и пользователю при разборе проблем.
- */
-const probeBackend = async (): Promise<void> => {
-	for (let attempt = 1; attempt <= 8; attempt++) {
-		try {
-			const result = await api.ping();
+/* Старт инъекций — отложенный и одноразовый: Steam в момент загрузки бандла
+ * ещё дорисовывает окно, а нам незачем быть первыми. */
+let started = false;
+const startOnce = (): void => {
+	if (started) return;
+	started = true;
+	try {
+		startUi();
+	} catch (error) {
+		console.error('[Version Rollback] не удалось запустить вставку UI:', error);
+	}
+};
+
+if (typeof requestIdleCallback === 'function') {
+	requestIdleCallback(() => startOnce(), { timeout: 5000 });
+} else {
+	window.setTimeout(startOnce, 2500);
+}
+
+/* Разовая самопроверка связи с бэкендом — для диагностики, без интервалов. */
+window.setTimeout(() => {
+	api
+		.ping()
+		.then((result) => {
 			console.info('[Version Rollback] backend ok ' + JSON.stringify(result));
 			try {
 				localStorage.setItem('vrb-probe', 'ok ' + JSON.stringify(result));
 			} catch {
 				/* игнорируем */
 			}
-			api.debugNote('backend ok ' + JSON.stringify(result)).catch((): void => undefined);
-			return;
-		} catch (error) {
-			if (attempt === 8) {
-				console.error('[Version Rollback] backend недоступен: ' + String(error));
-				try {
-					localStorage.setItem('vrb-probe', 'fail ' + String(error));
-				} catch {
-					/* игнорируем */
-				}
-				api.debugNote('backend fail: ' + String(error)).catch((): void => undefined);
-				return;
+		})
+		.catch((error) => {
+			console.error('[Version Rollback] backend недоступен: ' + String(error));
+			try {
+				localStorage.setItem('vrb-probe', 'fail ' + String(error));
+			} catch {
+				/* игнорируем */
 			}
-			await new Promise((resolve) => setTimeout(resolve, 1500));
-		}
+		});
+}, 8000);
+
+/* Чистый выход: снять корни и observer при перезапуске UI/выгрузке плагина. */
+window.addEventListener('beforeunload', () => {
+	try {
+		stopUi();
+	} catch {
+		/* игнорируем */
 	}
-};
-
-export default definePlugin(() => ({
-	title: 'Version Rollback',
-	icon: <Icon />,
-	content: (
-		<div id="version-rollback-settings-root" style={{ padding: '8px 0', fontSize: '13px', lineHeight: 1.5 }}>
-			<div>Панель выбора версии теперь в разделе «Библиотека» — кнопка в правом нижнем углу.</div>
-			<div style={{ opacity: 0.7, fontSize: '12px', marginTop: '6px' }}>
-				Здесь осталась только справка: настройки Millennium не место для выбора версии игры. Для конкретной игры откройте
-				Свойства → «Версии и бета-версии».
-			</div>
-		</div>
-	),
-}));
-
-// Важно: тело definePlugin Millennium вызывает лениво (при открытии своей страницы
-// настроек), поэтому вставку в свойства и самопроверку RPC запускаем сразу при
-// загрузке бандла.
-try {
-	// временно выключено для диагностики
-	void mountDock;
-} catch (error) {
-	console.error('[Version Rollback] не удалось поставить кнопку в библиотеке:', error);
-}
-
-try {
-	void startBetasSection;
-} catch (error) {
-	console.error('[Version Rollback] не удалось запустить вставку в свойства игры:', error);
-}
-
-void probeBackend();
+});

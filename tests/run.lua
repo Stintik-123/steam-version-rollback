@@ -444,6 +444,79 @@ test("collector: ссылка на Issue с телом", function()
 	check(#long < 9000, "ссылка укорочена")
 end)
 
+test("util: потолок размера IPC-ответа", function()
+	local small, cut = util.cap_string("привет", 100)
+	eq(cut, false, "короткая строка не режется")
+	eq(small, "привет", "короткая строка не меняется")
+	local big = string.rep("x", util.RPC_MAX_BYTES + 10)
+	local capped, cut2 = util.cap_string(big)
+	eq(cut2, true, "превышение лимита замечено")
+	eq(#capped, util.RPC_MAX_BYTES, "строка обрезана ровно по лимиту")
+	local list = {}
+	for i = 1, 150 do
+		list[i] = i
+	end
+	local short, cut3 = util.cap_list(list, 120)
+	eq(cut3, true, "длинный список замечен")
+	eq(#short, 120, "список обрезан до лимита")
+	local keep, cut4 = util.cap_list({ 1, 2 }, 120)
+	eq(cut4, false, "короткий список не режется")
+	eq(#keep, 2, "короткий список не меняется")
+end)
+
+test("util: encode_json_capped на обычном ответе", function()
+	local encoded = util.encode_json_capped({ ok = true })
+	check(type(encoded) == "string" and #encoded > 0, "заглушка энкодера отдаёт строку")
+end)
+
+test("versiondb: кэш базы и invalidate", function()
+	local versiondb = require("versiondb")
+	local db = versiondb.cached(60)
+	check(type(db) == "table", "кэш вернул таблицу")
+	check(versiondb.cached(60) == db, "в пределах ttl отдаётся тот же объект")
+	versiondb.invalidate()
+	check(versiondb.cached(60) ~= db, "после invalidate объект новый")
+end)
+
+test("collector: отчёт по одной игре не тянет чужие", function()
+	local collector = require("collector")
+	local versiondb = require("versiondb")
+	local fake = {
+		apps = {
+			["292030"] = {
+				name = "Witcher 3",
+				builds = { ["1"] = { ts = 100, branch = "public", depots = { ["292031"] = "111" } } },
+				manifests = {},
+			},
+			["1091500"] = {
+				name = "Cyberpunk",
+				builds = { ["2"] = { ts = 200, branch = "public", depots = { ["1091501"] = "222" } } },
+				manifests = {},
+			},
+		},
+	}
+	local old_user = versiondb.user
+	versiondb.user = function()
+		return fake
+	end
+	local ok, body, stats = pcall(collector.report, "292030")
+	versiondb.user = old_user
+	check(ok, "отчёт по одной игре не падает: " .. tostring(body))
+	eq(stats.apps, 1, "в отчёте одна игра")
+	check(type(body) == "string" and body:find("Witcher 3", 1, true) ~= nil, "нужная игра в отчёте")
+	check(type(body) == "string" and body:find("Cyberpunk", 1, true) == nil, "чужой игры в отчёте нет")
+	check(type(body) == "string" and body:find("292031=111", 1, true) ~= nil, "пара depot→GID на месте")
+
+	versiondb.user = function()
+		return fake
+	end
+	local ok2, all, stats2 = pcall(collector.report)
+	versiondb.user = old_user
+	check(ok2, "полный отчёт не падает")
+	eq(stats2.apps, 2, "без фильтра — все игры")
+	check(type(all) == "string" and all:find("Cyberpunk", 1, true) ~= nil, "вторая игра в полном отчёте")
+end)
+
 -- ============================ итог ============================
 if #failed > 0 then
 	error("ПРОВАЛЕНО " .. #failed .. ":\n  " .. table.concat(failed, "\n  "), 0)

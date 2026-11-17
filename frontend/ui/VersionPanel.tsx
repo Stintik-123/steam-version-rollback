@@ -2,7 +2,7 @@ import { Button, DialogButton, DialogButtonPrimary, Dropdown, Field, ProgressBar
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api, consoleProbe, openExternal } from '../lib/rpc';
-import { CONSENT_KEY, CONSENT_SHOWN_KEY, PLUGIN_VERSION } from '../lib/consts';
+import { CONSENT_KEY, CONSENT_SCOPE, CONSENT_SHOWN_KEY } from '../lib/consts';
 import { asArray, fmtBytes, fmtTime, type AppDetail, type AppState, type CollectSummary, type CollectionReport, type ImportResult, type LocalCacheResult, type LocalCollectResult, type PlanResult, type Snapshot, type SourcesProbeResult, type SteamCountsResult, type VersionsResult } from '../lib/types';
 
 const MODE_DOWNLOAD = 'download';
@@ -230,9 +230,10 @@ export const VersionPanel = ({ appidHint, context }: { appidHint?: string; conte
 	const toggleCollect = (value: boolean) => {
 		setCollectEnabled(value);
 		api.setSetting(CONSENT_KEY, value ? 'yes' : 'no').catch((): void => undefined);
-		api.setSetting(CONSENT_SHOWN_KEY, PLUGIN_VERSION).catch((): void => undefined);
+		api.setSetting(CONSENT_SHOWN_KEY, CONSENT_SCOPE).catch((): void => undefined);
 		setConsent(value ? 'yes' : 'no');
-		setConsentShownFor(PLUGIN_VERSION);
+		setConsentShownFor(CONSENT_SCOPE);
+		window.dispatchEvent(new Event('vrb-consent-changed'));
 		setMessage(value ? 'локальный сбор включён' : 'локальный сбор выключен');
 	};
 
@@ -360,9 +361,10 @@ export const VersionPanel = ({ appidHint, context }: { appidHint?: string; conte
 	const answerConsent = async (yes: boolean) => {
 		try {
 			await api.setSetting('collect_consent', yes ? 'yes' : 'no');
-			await api.setSetting('consent_shown_for', PLUGIN_VERSION);
+			await api.setSetting('consent_shown_for', CONSENT_SCOPE);
 			setConsent(yes ? 'yes' : 'no');
-			setConsentShownFor(PLUGIN_VERSION);
+			setConsentShownFor(CONSENT_SCOPE);
+			window.dispatchEvent(new Event('vrb-consent-changed'));
 			setCollectEnabled(yes);
 			setMessage(yes ? 'спасибо: сбор включён, запускаю сбор по всем играм' : 'сбор отключён — плагин ничего не читает и никуда не отправляет');
 			if (yes) await runCollectAll(false);
@@ -466,10 +468,10 @@ export const VersionPanel = ({ appidHint, context }: { appidHint?: string; conte
 			)}
 			{message && <div style={styles.card}>{message}</div>}
 
-			{consentShownFor !== PLUGIN_VERSION && context !== 'settings' && (
+			{consentShownFor !== CONSENT_SCOPE && context !== 'settings' && (
 				<div style={{ ...styles.card, ...styles.warn }}>
 					<div>
-						<b>Крупное обновление Version Rollback {PLUGIN_VERSION}</b>
+						<b>Version Rollback: сбор метаданных о версиях — вопрос один раз</b>
 					</div>
 					<div style={{ marginTop: '6px' }}>
 						Теперь плагин умеет собирать версии по максимуму: по всем установленным играм берутся
@@ -590,7 +592,7 @@ export const VersionPanel = ({ appidHint, context }: { appidHint?: string; conte
 				</div>
 			)}
 
-			{consentShownFor !== PLUGIN_VERSION && context === 'settings' && (
+			{consentShownFor !== CONSENT_SCOPE && context === 'settings' && (
 				<div style={{ ...styles.card, ...styles.warn }}>
 					Выбор «собирать ли данные о версиях» задаётся не здесь, а в разделе <b>Библиотека</b> Steam:
 					баннер в правом нижнем углу или блок в «Свойства → Версии и бета-версии». Пока решение не принято,
@@ -602,7 +604,7 @@ export const VersionPanel = ({ appidHint, context }: { appidHint?: string; conte
 				<Toggle value={collectEnabled} onChange={toggleCollect} />
 				<div style={{ ...styles.mono, marginTop: '4px' }}>
 					Текущее решение: {consent === 'yes' ? 'сбор разрешён' : consent === 'no' ? 'сбор запрещён' : 'решение не принято'}
-					{consentShownFor ? ` (для версии ${consentShownFor})` : ''}
+					{consentShownFor ? ` (отметка вопроса: ${consentShownFor})` : ''}
 				</div>
 			</Field>
 

@@ -26,9 +26,15 @@ local function json_call(fn)
 		return util.encode_json({ ok = false, error = tostring(res) })
 	end
 	if type(res) == "string" then
-		return res
+		-- строки приходят уже готовым JSON: режем и их, если вдруг огромные
+		local capped, truncated = util.cap_string(res)
+		if truncated then
+			util.err("RPC: строковый ответ превысил лимит IPC — отправлена заглушка")
+			return util.encode_json({ ok = false, truncated = true, error = "ответ слишком большой для IPC" })
+		end
+		return capped
 	end
-	return util.encode_json(res or { ok = true })
+	return util.encode_json_capped(res or { ok = true })
 end
 
 local function cfg_get(key, default)
@@ -216,7 +222,8 @@ function debug_note(text)
 	return json_call(function()
 		local dir = util.data_dir()
 		local path = require("fs").join(dir, "frontend-debug.txt")
-		local ok = require("utils").append_file(path, tostring(util.now()) .. " " .. tostring(text) .. "\n")
+		local line = util.cap_string(tostring(text), 400)
+		local ok = require("utils").append_file(path, tostring(util.now()) .. " " .. line .. "\n")
 		return { ok = ok ~= nil, path = path }
 	end)
 end
@@ -284,6 +291,9 @@ function get_versions(appid, branch, force)
 		for _, buildid in ipairs(order) do
 			out[#out + 1] = merged[buildid]
 		end
+		-- IPC-потолок: сотни сборок в одном ответе роняли хост в 0.5.x
+		local capped_out, truncated_list = util.cap_list(out, 120)
+		out = capped_out
 		table.sort(out, function(a, b2)
 			if (a.ts or 0) ~= (b2.ts or 0) then
 				return (a.ts or 0) > (b2.ts or 0)
@@ -297,9 +307,127 @@ function get_versions(appid, branch, force)
 			app_name = info.name,
 			branch = b,
 			versions = out,
+			truncated = truncated_list or nil,
 			db = versiondb.summary(db, id),
 			warning = (not versions) and verr or nil,
 		}
+	end)
+end
+
+--- Состояние согласия на сбор: yes / no / "" и факт, что вопрос уже задавали.
+---@ffi
+---@return string JSON { consent, asked, shown_for, github_token_set }
+function get_consent()
+	return json_call(function()
+		local consent = consent_state()
+		local shown = tostring(cfg_get("consent_shown_for", ""))
+		return {
+			ok = true,
+			consent = consent,
+			asked = (consent ~= "") or (shown ~= ""),
+			shown_for = shown,
+			github_token_set = (cfg_get("github_token", "") ~= ""),
+		}
+	end)
+end
+
+--- Зафиксировать ответ пользователя на вопрос о сборе.
+---@ffi
+---@param value string "yes" | "no"
+---@return string JSON
+function set_consent(value)
+	return json_call(function()
+		local v = tostring(value)
+		if v ~= "yes" and v ~= "no" then
+			return { ok = false, error = "ожидается yes или no" }
+		end
+		pcall(millennium.config.set, "collect_consent", v)
+		pcall(millennium.config.set, "consent_shown_for", "scope-1")
+		util.log("согласие на сбор: " .. v)
+		return { ok = true, consent = v }
+	end)
+end
+
+--- Есть ли игра в общей базе версий. Дёшево: без сети, кэш базы на 60 с.
+---@ffi
+---@param appid string
+---@return string JSON { known, in_db, builds, manifests }
+function app_known(appid)
+	return json_call(function()
+		local id = util.norm_id(appid)
+		if not id then
+			return { ok = false, error = "некорректный AppID" }
+		end
+		local summary = versiondb.summary(versiondb.cached(60), id)
+		return {
+			ok = true,
+			appid = id,
+			known = summary.in_db == true,
+			in_db = summary.in_db,
+			builds = summary.builds or 0,
+			manifests = summary.manifests or 0,
+		}
+	end)
+end
+
+--- Сбор по одной игре + оформление Issue: с токеном создаётся автоматически,
+--- без токена возвращаем предзаполненную ссылку (отправляет пользователь).
+---@ffi
+---@param appid string
+---@return string JSON { number?, url?, truncated?, stats? }
+function submit_app_issue(appid)
+	return json_call(function()
+		if not local_collect_allowed() then
+			return { ok = false, error = "сбор не разрешён: сначала ответьте на вопрос в библиотеке" }
+		end
+		local id = util.norm_id(appid)
+		if not id then
+			return { ok = false, error = "некорректный AppID" }
+		end
+		-- убедимся, что по игре что-то собрано (локально, без принудительной сети)
+		local db = versiondb.user() or { version = versiondb.VERSION, updated = 0, apps = {} }
+		local row = collector.collect_app(db, id, false)
+		versiondb.save_user(db)
+
+		local body, stats = collector.report(id)
+		if stats.apps == 0 then
+			return { ok = false, error = "по игре пока нет метаданных: локальные кэши Steam пусты, повторите после установки/запуска игры" }
+		end
+		local title = string.format("Версия %s: %s сборок, %s манифестов (локальный сбор)", id, tostring(stats.builds), tostring(stats.manifests))
+		local token = tostring(cfg_get("github_token", ""))
+		if token ~= "" then
+			local payload = util.encode_json({ title = title, body = body, labels = { "version-data" } })
+			local headers = {
+				["Authorization"] = "Bearer " .. token,
+				["Accept"] = "application/vnd.github+json",
+				["Content-Type"] = "application/json",
+				["User-Agent"] = "VersionRollback/0.6 (Millennium plugin)",
+			}
+			local ok, res = pcall(function()
+				if http.post then
+					return http.post("https://api.github.com/repos/" .. collector.REPO .. "/issues", {
+						headers = headers,
+						body = payload,
+						timeout = 25,
+					})
+				end
+				return http.request("https://api.github.com/repos/" .. collector.REPO .. "/issues", {
+					method = "POST",
+					headers = headers,
+					body = payload,
+					timeout = 25,
+				})
+			end)
+			if ok and res and (res.status == 201 or res.status == 200) then
+				local decoded = util.decode_json(res.body or "")
+				util.log("Issue создан: " .. tostring(decoded and decoded.html_url))
+				return { ok = true, number = decoded and decoded.number, url = decoded and decoded.html_url, stats = stats, auto = true }
+			end
+			util.warn("GitHub API не принял Issue: " .. tostring(res and res.status))
+			-- падаем в ссылочный путь: пользователь отправит сам
+		end
+		local url, truncated = collector.issue_url(body, title)
+		return { ok = true, url = url, truncated = truncated, stats = stats, auto = false, errors = row.errors }
 	end)
 end
 
@@ -637,6 +765,7 @@ function get_collection_report()
 			return { ok = false, error = "сбор не разрешён" }
 		end
 		local body, stats = collector.report()
+		body = util.cap_string(body, 50000)
 		local url, truncated = collector.issue_url(body, "Сбор версий Steam: " .. tostring(stats.apps) .. " игр")
 		return {
 			ok = true,
@@ -933,7 +1062,11 @@ end
 ---@return string JSON
 function get_log()
 	return json_call(function()
-		return { ok = true, log = util.log_tail(120) }
+		local rows = util.log_tail(80)
+		for _, row in ipairs(rows) do
+			row.msg = util.cap_string(tostring(row.msg), 240)
+		end
+		return { ok = true, log = rows }
 	end)
 end
 

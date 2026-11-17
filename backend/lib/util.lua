@@ -113,6 +113,63 @@ function util.encode_json(tbl)
 	return encoded
 end
 
+--- Жёсткий потолок размера ответа RPC.
+---
+--- Ответ бэкенда идёт во фронтенд через IPC Lua-хоста Millennium. Ответ
+--- неограниченного размера (вся база версий, весь лог, сотни сборок) — это
+--- переполнение буфера в нативном слое и падение хоста с 0xC0000409.
+--- Поэтому: (1) списки режутся У источника, (2) здесь — страховка: если
+--- строка всё же превысила лимит, вместо неё уходит понятная заглушка,
+--- а не мегабайты в IPC.
+util.RPC_MAX_BYTES = 65536
+
+function util.cap_string(text, limit)
+	limit = limit or util.RPC_MAX_BYTES
+	if type(text) ~= "string" then
+		return text, false
+	end
+	if #text <= limit then
+		return text, false
+	end
+	return text:sub(1, limit), true
+end
+
+--- encode_json с предохранителем: превысили лимит — отдаём валидный JSON
+--- с пометкой truncated, вместо того чтобы ронять хост огромной строкой.
+function util.encode_json_capped(tbl, limit)
+	local encoded = util.encode_json(tbl)
+	local capped, truncated = util.cap_string(encoded, limit)
+	if not truncated then
+		return encoded
+	end
+	util.err("ответ RPC превысил " .. tostring(limit) .. " байт — отправлена заглушка")
+	return util.encode_json({
+		ok = false,
+		truncated = true,
+		error = "ответ слишком большой для IPC; сузьте запрос (меньше сборок/записей)",
+	})
+end
+
+--- Обрезать список сверху, сохранив пометку о обрезке.
+function util.cap_list(list, limit)
+	limit = limit or 100
+	if type(list) ~= "table" then
+		return list, false
+	end
+	local n = 0
+	for _ in pairs(list) do
+		n = n + 1
+	end
+	if n <= limit then
+		return list, false
+	end
+	local out = {}
+	for i = 1, limit do
+		out[i] = list[i]
+	end
+	return out, true
+end
+
 function util.read_file(path)
 	if not fs.exists(path) then
 		return nil

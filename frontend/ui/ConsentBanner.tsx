@@ -1,54 +1,72 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 
-import { CONSENT_KEY, CONSENT_SHOWN_KEY, PLUGIN_VERSION } from '../lib/consts';
-import { api } from '../lib/rpc';
+import { api, openExternal } from '../lib/rpc';
 
 /**
- * Компактный баннер с выбором «собирать данные о версиях или нет».
+ * Карточка единственного вопроса: «разрешаете собирать метаданные о версиях
+ * игр, которых ещё нет в общей базе, и отправлять их в Issue проекта?».
  *
- * Показывается в разделе «Библиотека» Steam: решение пользователя важно
- * показать там, где он видит свои игры, а не в настройках плагина.
- * Сам плагин без согласия не читает ни content_log.txt, ни depotcache.
+ * Показывается ОДИН раз за всё время (решение хранится в настройках
+ * Millennium: collect_consent + consent_shown_for) и только когда плагин
+ * реально встретил игру, которой нет в базе версий — то есть когда сбор
+ * имеет смысл. Внизу окна, поверх страницы библиотеки.
+ *
+ * При «да»: метаданные собираются по этой игре и сразу оформляются в Issue:
+ * с токеном — создаётся автоматически, без токена — открывается готовая
+ * форма на GitHub (отправка одним нажатием, ничего не уходит само).
  */
-export const ConsentBanner = ({ onResolved }: { onResolved?: (agreed: boolean) => void }) => {
-	const [state, setState] = useState<'loading' | 'ask' | 'done'>('loading');
+export const ConsentCard = ({
+	appid,
+	appName,
+	onDone,
+}: {
+	appid: string;
+	appName?: string;
+	onDone?: (agreed: boolean) => void;
+}) => {
 	const [busy, setBusy] = useState(false);
+	const [status, setStatus] = useState('');
 	const [error, setError] = useState('');
-
-	useEffect(() => {
-		api
-			.getState()
-			.then((s: any) => {
-				const shown = String(s?.config?.consent_shown_for ?? '');
-				if (shown === PLUGIN_VERSION) {
-					setState('done');
-					onResolved?.(s?.config?.collect_consent === 'yes');
-				} else {
-					setState('ask');
-				}
-			})
-			.catch(() => setState('ask'));
-	}, []);
 
 	const answer = async (yes: boolean) => {
 		setBusy(true);
 		setError('');
+		setStatus('');
 		try {
-			await api.setSetting(CONSENT_KEY, yes ? 'yes' : 'no');
-			await api.setSetting(CONSENT_SHOWN_KEY, PLUGIN_VERSION);
-			setState('done');
-			onResolved?.(yes);
+			await api.setConsent(yes ? 'yes' : 'no');
+			if (!yes) {
+				setStatus('Принято. Плагин ничего не собирает и никуда не отправляет.');
+				onDone?.(false);
+				return;
+			}
+			setStatus('Собираю метаданные по игре…');
+			const collected = await api.collectApp(appid);
+			if (collected && collected.ok === false) {
+				setError(String(collected.error ?? 'сбор не удался'));
+				onDone?.(true);
+				return;
+			}
+			setStatus('Оформляю Issue на GitHub…');
+			const issue = await api.submitAppIssue(appid);
+			if (issue?.number) {
+				setStatus(`Готово: создан Issue #${issue.number}. Спасибо!`);
+			} else if (issue?.url) {
+				openExternal(issue.url);
+				setStatus('Готово: форма Issue открылась в браузере — проверьте текст и нажмите «Create». Отправляете только вы.');
+			} else {
+				setError(String(issue?.error ?? 'не удалось оформить Issue'));
+			}
+			onDone?.(true);
 		} catch (e) {
 			setError(String(e instanceof Error ? e.message : e));
+			onDone?.(yes);
 		} finally {
 			setBusy(false);
 		}
 	};
 
-	if (state !== 'ask') return null;
-
 	const box: React.CSSProperties = {
-		width: '340px',
+		width: '360px',
 		padding: '12px 14px',
 		borderRadius: '6px',
 		background: 'linear-gradient(180deg, rgba(23,26,33,.98), rgba(12,14,18,.98))',
@@ -56,7 +74,7 @@ export const ConsentBanner = ({ onResolved }: { onResolved?: (agreed: boolean) =
 		boxShadow: '0 10px 34px rgba(0,0,0,.55)',
 		color: '#e6e6e6',
 		fontSize: '13px',
-		lineHeight: '1.45',
+		lineHeight: 1.45,
 	};
 
 	const button: React.CSSProperties = {
@@ -69,28 +87,21 @@ export const ConsentBanner = ({ onResolved }: { onResolved?: (agreed: boolean) =
 	};
 
 	return (
-		<div style={box} role="dialog" aria-label="Выбор сбора данных">
-			<div style={{ fontWeight: '700', marginBottom: '6px', color: '#ffd166' }}>
-				Крупное обновление Version Rollback {PLUGIN_VERSION}
+		<div style={box} role="dialog" aria-label="Сбор метаданных о версиях">
+			<div style={{ fontWeight: 700, marginBottom: 6, color: '#ffd166' }}>Version Rollback: вопрос один раз</div>
+			<div style={{ marginBottom: 8 }}>
+				Игры <b>{appName ? `${appName} ` : ''}(AppID {appid})</b> ещё нет в общей базе версий плагина. Разрешаете
+				собрать по ней метаданные — только AppID, buildid и пары depotid → manifest GID (без ключей депо, без
+				аккаунта, без файлов игры) — и отправить их в Issue проекта, чтобы версия появилась в базе?
 			</div>
-			<div style={{ marginBottom: '8px' }}>
-				Плагин умеет собирать версии по максимуму: локальные кэши Steam (content_log.txt, depotcache,
-				appmanifest), сборки и манифесты из SteamRaw, текущие GID из SteamCounts. Это только метаданные:
-				AppID, buildid, depotid и manifest GID — без ключей депо и без обхода прав.
+			<div style={{ marginBottom: 10, opacity: 0.85, fontSize: 12 }}>
+				«Да» — сбор и Issue по этой игре (без токена GitHub откроется готовая форма: отправляете вы сами).
+				«Нет» — плагин не читает локальные кэши Steam и ничего не отправляет. Переспрашивать не будем.
 			</div>
-			<div style={{ marginBottom: '10px' }}>
-				<b>Собирать данные о версиях с вашего компьютера?</b> Если «да» — плагин соберёт их в локальную
-				базу и покажет отчёт, который можно отправить в Issue проекта на GitHub (отправляете его вы сами).
-				Если «нет» — плагин ничего не читает и никуда не отправляет.
-			</div>
-			{error && <div style={{ color: '#ff6b6b', marginBottom: '6px' }}>{error}</div>}
-			<div style={{ display: 'flex', gap: '8px' }}>
-				<button
-					type="button"
-					style={{ ...button, background: '#1a9fff', color: '#fff' }}
-					disabled={busy}
-					onClick={() => answer(true)}
-				>
+			{status && <div style={{ marginBottom: 6, color: '#8fd18f' }}>{status}</div>}
+			{error && <div style={{ marginBottom: 6, color: '#ff6b6b' }}>{error}</div>}
+			<div style={{ display: 'flex', gap: 8 }}>
+				<button type="button" style={{ ...button, background: '#1a9fff', color: '#fff' }} disabled={busy} onClick={() => answer(true)}>
 					Да, собирать
 				</button>
 				<button
