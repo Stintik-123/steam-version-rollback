@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api, consoleProbe, openExternal } from '../lib/rpc';
 import { CONSENT_KEY, CONSENT_SCOPE, CONSENT_SHOWN_KEY } from '../lib/consts';
-import { asArray, fmtBytes, fmtTime, type AppDetail, type AppState, type CollectSummary, type CollectionReport, type ImportResult, type LocalCacheResult, type LocalCollectResult, type PlanResult, type Snapshot, type SourcesProbeResult, type SteamCountsResult, type VersionsResult } from '../lib/types';
+import { asArray, fmtBytes, fmtTime, type AppDetail, type AppState, type CollectSummary, type ImportResult, type LocalCacheResult, type LocalCollectResult, type PlanResult, type Snapshot, type SourcesProbeResult, type SteamCountsResult, type VersionsResult } from '../lib/types';
 
 const MODE_DOWNLOAD = 'download';
 const MODE_SWAP = 'swap';
@@ -86,7 +86,6 @@ export const VersionPanel = ({ appidHint, context }: { appidHint?: string; conte
 	const [consent, setConsent] = useState('');
 	const [consentShownFor, setConsentShownFor] = useState('');
 	const [collectSummary, setCollectSummary] = useState<CollectSummary | null>(null);
-	const [report, setReport] = useState<CollectionReport | null>(null);
 	const [collectAllBusy, setCollectAllBusy] = useState(false);
 	const [token, setToken] = useState('');
 	const [message, setMessage] = useState('');
@@ -371,8 +370,6 @@ export const VersionPanel = ({ appidHint, context }: { appidHint?: string; conte
 			};
 			setCollectSummary(summary);
 			setMessage(`собрано: игр ${installed.length} · новых сборок ${builds} · манифестов ${manifests}`);
-			const rep = (await api.getCollectionReport()) as CollectionReport;
-			setReport(rep);
 		} catch (error) {
 			fail(error);
 		} finally {
@@ -406,10 +403,19 @@ export const VersionPanel = ({ appidHint, context }: { appidHint?: string; conte
 		}
 	};
 
-	const postIssue = async () => {
+	// Одна кнопка: отчёт по выбранной игре и отправка.
+	// С токеном бэкенд создаёт Issue сам; без токена вернёт предзаполненную ссылку — открываем её.
+	const sendIssue = async () => {
+		if (!appid) return setMessage('выбери игру');
 		try {
-			const result = await api.postGithubIssue();
-			setMessage(result.ok ? `Issue создан: ${result.url ?? result.number}` : (result.error ?? 'не создался'));
+			const result = await api.submitAppIssue(appid);
+			if (!result.ok) return setMessage(result.error ?? 'не отправилось');
+			if (result.auto) {
+				setMessage(`Issue создан: ${result.url ?? result.number}`);
+			} else {
+				setMessage('отчёт готов: откроется форма GitHub Issue, нажмите «Submit new issue»');
+				if (result.url) openExternal(result.url as string);
+			}
 		} catch (error) {
 			fail(error);
 		}
@@ -548,7 +554,8 @@ export const VersionPanel = ({ appidHint, context }: { appidHint?: string; conte
 					<DialogButton onClick={() => runAppdbSearch()} disabled={busy || appdbBusy || !appQuery.trim()}>
 						{appdbBusy ? 'Ищу…' : 'Найти AppID'}
 					</DialogButton>
-					<DialogButton onClick={() => runAppdbSearch(true)} disabled={busy || appdbBusy || !appQuery.trim()}>						Обновить базу
+					<DialogButton onClick={() => runAppdbSearch(true)} disabled={busy || appdbBusy || !appQuery.trim()}>
+						Обновить базу
 					</DialogButton>
 				</div>
 				{appdbResults.length > 0 && (
@@ -733,30 +740,21 @@ export const VersionPanel = ({ appidHint, context }: { appidHint?: string; conte
 				</div>
 			)}
 
-			{report?.ok && (
-				<div style={styles.card}>
-					<div>
-						Отчёт для Issue: игр {report.stats?.apps ?? 0} · сборок {report.stats?.builds ?? 0}
-						{report.truncated ? ' · тело урезано (полный отчёт — в файле или через токен)' : ''}
-					</div>
-					<div style={{ ...styles.row, marginTop: '6px' }}>
-						<DialogButtonPrimary onClick={() => openExternal(report.url as string)}>Открыть Issue на GitHub</DialogButtonPrimary>
-						<DialogButton onClick={postIssue}>Создать Issue автоматически</DialogButton>
-						<DialogButton onClick={() => openExternal('https://github.com/settings/tokens/new?scopes=repo&description=Version+Rollback')}>
-							Создать токен на GitHub
-						</DialogButton>
-					</div>
-					<TextField
-						label="GitHub-токен (для автосоздания Issue)"
-						value={token}
-						onChange={(e) => setToken(e.currentTarget.value.trim())}
-						description="personal access token с правом repo. Хранится в настройках Millennium."
-					/>
-					<DialogButton onClick={saveToken} disabled={!token}>
-						Сохранить токен
-					</DialogButton>
-				</div>
-			)}
+			<Field label="Отправить отчёт о версиях" description="Отчёт по выбранной игре уйдёт в Issue проекта на GitHub. Только метаданные: AppID, buildid, depotid и manifest GID — без ключей и аккаунта." bottomSeparator="standard">
+				<DialogButtonPrimary onClick={sendIssue} disabled={busy || !appid || !collectEnabled}>
+					Подтвердить и отправить
+				</DialogButtonPrimary>
+			</Field>
+
+			<TextField
+				label="GitHub-токен (необязательно: без него откроется форма Issue в браузере)"
+				value={token}
+				onChange={(e) => setToken(e.currentTarget.value.trim())}
+				description="personal access token с правом repo. Хранится в настройках Millennium."
+			/>
+			<DialogButton onClick={saveToken} disabled={!token}>
+				Сохранить токен
+			</DialogButton>
 
 			{collect && (
 				<div style={styles.card}>

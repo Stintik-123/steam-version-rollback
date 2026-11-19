@@ -3718,7 +3718,6 @@ function probe_sources()
 			{ name = "SteamDB", url = "https://steamdb.info/app/1091500/depots/", kind = "html" },
 			{ name = "HubcapDB", url = "https://hubcapmanifest.com/", kind = "html" },
 			{ name = "SMD", url = "https://smd.mcbabel.de", kind = "html" },
-			{ name = "opensteamdb-api", url = "https://opensteamdb-api.invalid/api/app/1/info", kind = "json" },
 			{ name = "Ryuu Manifests", url = "https://manifest-api.ryuu.space/", kind = "json" },
 			{ name = "Open-SteamDB", url = "https://opensteamdb.net/", kind = "html" },
 			{ name = "Steam AppDB", url = "https://steamappdb.net/", kind = "html" },

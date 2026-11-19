@@ -28,7 +28,6 @@ const SOURCES = [
 	{ id: 1, name: 'SteamRaw /changelists', kind: 'json', url: `https://steamraw.com/api/app/${APPID}/changelists` },
 	{ id: 2, name: 'SteamCounts (HTML)', kind: 'html', url: `https://steamcounts.info/app/${APPID}` },
 	{ id: 3, name: 'SteamDB (HTML, автопарсинг запрещён)', kind: 'html', url: `https://steamdb.info/app/${APPID}/depots/` },
-	{ id: 4, name: 'opensteamdb-api (только self-host)', kind: 'json', url: 'https://opensteamdb-api.example/api/app/1/info' },
 	{ id: 6, name: 'HubcapDB', kind: 'json', url: `https://hubcapmanifest.com/api/depots?appid=${APPID}` },
 	{ id: 7, name: "Ryuu's Manifests", kind: 'json', url: `https://manifest-api.ryuu.space/api/app/${APPID}` },
 	{ id: 8, name: 'SMD (smd.mcbabel.de)', kind: 'html', url: 'https://smd.mcbabel.de' },

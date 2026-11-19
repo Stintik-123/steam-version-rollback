@@ -41,6 +41,41 @@ const findTextBySubstrings = (subs: string[]): HTMLElement | null => {
 	return null;
 };
 
+/** Дата ленты: «14 октября», «14 October» — короткий текст из числа и слова. */
+const DATE_RE = /^\d{1,2}\s+\p{L}+\.?$/u;
+
+/** Первый элемент с датой ленты, идущий в документе после заданного узла. */
+const findNextDateAfter = (from: HTMLElement): HTMLElement | null => {
+	if (!document.body) return null;
+	const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+	walker.currentNode = from;
+	let node: Node | null = walker.nextNode();
+	while (node) {
+		const text = (node.nodeValue ?? '').trim();
+		if (text.length > 0 && text.length < 30 && DATE_RE.test(text) && node.parentElement) {
+			return node.parentElement;
+		}
+		node = walker.nextNode();
+	}
+	return null;
+};
+
+const commonAncestor = (a: HTMLElement, b: HTMLElement): HTMLElement | null => {
+	const seen = new Set<HTMLElement>();
+	for (let n: HTMLElement | null = a; n; n = n.parentElement) seen.add(n);
+	for (let n: HTMLElement | null = b; n; n = n.parentElement) {
+		if (seen.has(n)) return n;
+	}
+	return null;
+};
+
+/** Потомок `ancestor`, в котором лежит `node`. */
+const childOf = (ancestor: HTMLElement, node: HTMLElement): HTMLElement | null => {
+	let n: HTMLElement | null = node;
+	while (n && n.parentElement !== ancestor) n = n.parentElement;
+	return n;
+};
+
 const findAppId = (): string | undefined => {
 	const href = `${String(location.href ?? '')} ${String(location.hash ?? '')}`;
 	const fromUrl = href.match(/(?:#|\/)(?:app|details|library\/app)\/(\d{3,})(?:\/|\?|$)/i);
@@ -76,10 +111,23 @@ const findAppId = (): string | undefined => {
 const placeHost = (host: HTMLElement): boolean => {
 	if (!document.body) return false;
 	const activity = findTextBySubstrings(ACTIVITY_SUB);
-	if (activity?.parentElement) {
-		activity.parentElement.insertBefore(host, activity);
-		log('карточка размещена перед блоком активности');
-		return true;
+	if (activity) {
+		// Предпочтительно: после поля «Расскажите…» и перед первой датой ленты.
+		const dateEl = findNextDateAfter(activity);
+		if (dateEl) {
+			const common = commonAncestor(activity, dateEl);
+			const child = common ? childOf(common, dateEl) : null;
+			if (child?.parentElement) {
+				child.parentElement.insertBefore(host, child);
+				log('карточка размещена после поля активности, перед датой');
+				return true;
+			}
+		}
+		if (activity.parentElement) {
+			activity.parentElement.insertBefore(host, activity);
+			log('карточка размещена перед блоком активности');
+			return true;
+		}
 	}
 	const update = findTextBySubstrings(UPDATE_SUB);
 	if (update?.parentElement) {
@@ -191,4 +239,4 @@ export const GlobalCard = () => {
 };
 
 /** Dock отключён. */
-export const GlobalDock = () => null;
+export const GlobalDock = (): null => null;
